@@ -867,7 +867,9 @@ void Fh1NativeExecutor::SnapshotCameraDepth(uint32_t band_row) {
   command_buffer.CmdVkPushConstants(camera_depth_pipeline_layout_, VK_SHADER_STAGE_COMPUTE_BIT, 0,
                                     sizeof(constants), &constants);
   command_processor_.BindExternalComputePipeline(camera_depth_pipelines_[surface->samples > 1]);
+  command_processor_.Checkpoint(VulkanCommandProcessor::CheckpointKind::kCompute, UINT32_MAX, "camera depth");
   command_buffer.CmdVkDispatch((width + 7) / 8, (height + 7) / 8, 1);
+  command_processor_.Checkpoint(VulkanCommandProcessor::CheckpointKind::kCompute, UINT32_MAX, "camera depth end");
   camera_depth_rows_ = std::max(camera_depth_rows_, dest_row + height);
   Count("camera_depth_snapshot");
 }

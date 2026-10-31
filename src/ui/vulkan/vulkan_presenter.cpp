@@ -2289,6 +2289,15 @@ Presenter::PaintResult VulkanPresenter::PaintAndPresentImpl(bool execute_ui_draw
   }
 
   VkCommandBuffer draw_command_buffer = paint_submission.draw_command_buffer();
+  // Top bit: told apart from the command processor's serials when it reports a lost device.
+  const auto paint_checkpoint = [&](uint64_t stage) {
+    if (vulkan_device_->extensions().ext_NV_device_diagnostic_checkpoints) {
+      dfn.vkCmdSetCheckpointNV(
+          draw_command_buffer,
+          reinterpret_cast<const void*>(
+              uintptr_t((uint64_t(1) << 63) | (current_paint_submission_index << 8) | stage)));
+    }
+  };
   VkCommandBufferBeginInfo command_buffer_begin_info;
   command_buffer_begin_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
   command_buffer_begin_info.pNext = nullptr;
@@ -2302,6 +2311,7 @@ Presenter::PaintResult VulkanPresenter::PaintAndPresentImpl(bool execute_ui_draw
   }
   // vkResetCommandPool resets from both initial and recording states, still
   // safe to return early from this function in case of an error.
+  paint_checkpoint(0);
 
 #if REX_PLATFORM_MAC
   SyncMacMetalLayerDrawableSize(paint_context_.mac_metal_layer, paint_context_.swapchain_extent);
@@ -2740,12 +2750,14 @@ Presenter::PaintResult VulkanPresenter::PaintAndPresentImpl(bool execute_ui_draw
                                      VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0, nullptr, 0,
                                      nullptr, 1, &barrier_to_uav);
 
-            if (DispatchTemporalUpscaler(draw_command_buffer, *temporal_upscaler, source_image,
-                                         source_view, effect_input_width, effect_input_height,
-                                         output_image, output.view(), effect_rect_size.first,
-                                         effect_rect_size.second, guest_output_refresh_serial,
-                                         use_camera ? &source : nullptr,
-                                         use_camera ? &guest_output_camera : nullptr)) {
+            paint_checkpoint(1);
+            const bool upscaled = DispatchTemporalUpscaler(
+                draw_command_buffer, *temporal_upscaler, source_image, source_view,
+                effect_input_width, effect_input_height, output_image, output.view(),
+                effect_rect_size.first, effect_rect_size.second, guest_output_refresh_serial,
+                use_camera ? &source : nullptr, use_camera ? &guest_output_camera : nullptr);
+            paint_checkpoint(2);
+            if (upscaled) {
               const std::string& view_mode = REXCVAR_GET(present_upscaler_view);
               const uint32_t debug_view =
                   !use_camera ? 0u : view_mode == "depth" ? 1u : view_mode == "motion" ? 2u : 0u;
@@ -3279,6 +3291,7 @@ Presenter::PaintResult VulkanPresenter::PaintAndPresentImpl(bool execute_ui_draw
   if (dxgi_swapchain) dxgi_swapchain->RecordRelease(draw_command_buffer, swapchain_image_index);
 #endif
 
+  paint_checkpoint(3);
   dfn.vkEndCommandBuffer(draw_command_buffer);
 
   VkPipelineStageFlags acquire_semaphore_wait_stage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;

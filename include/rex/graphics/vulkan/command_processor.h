@@ -282,6 +282,7 @@ class VulkanCommandProcessor : public CommandProcessor {
     kTextureLoadEnd,
     // Recorded on the CPU only, without a marker in the command stream.
     kNote,
+    kCompute,
   };
   // Without a value, the current draw index in the frame.
   void Checkpoint(CheckpointKind kind, uint32_t value = UINT32_MAX, std::string detail = {});

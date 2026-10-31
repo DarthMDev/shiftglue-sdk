@@ -3010,7 +3010,9 @@ bool VulkanTextureCache::LoadTextureDataFromResidentMemoryUntimed(Texture& textu
       }
       command_buffer.CmdVkPushConstants(copy_pipeline_layout_, VK_SHADER_STAGE_COMPUTE_BIT, 0,
                                         sizeof(copy_constants), copy_constants);
+      command_processor_.Checkpoint(VulkanCommandProcessor::CheckpointKind::kCompute, UINT32_MAX, "texture copy");
       command_buffer.CmdVkDispatch((copy_width + 7) / 8, (copy_height + 7) / 8, array_size);
+      command_processor_.Checkpoint(VulkanCommandProcessor::CheckpointKind::kCompute, UINT32_MAX, "texture copy end");
       return true;
     }
   }

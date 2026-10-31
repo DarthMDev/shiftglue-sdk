@@ -4901,8 +4901,10 @@ void VulkanCommandProcessor::IssueSwapImpl(uint32_t frontbuffer_ptr, uint32_t fr
                                                         sizeof(camera_constants),
                                                         &camera_constants);
             BindExternalComputePipeline(swap_camera_pipeline_);
+            Checkpoint(CheckpointKind::kCompute, UINT32_MAX, "camera motion");
             deferred_command_buffer_.CmdVkDispatch((guest_output_width + 7) / 8,
                                                    (guest_output_height + 7) / 8, 1);
+            Checkpoint(CheckpointKind::kCompute, UINT32_MAX, "camera motion end");
             ClearObjectSlotImage(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT,
                                  VK_IMAGE_LAYOUT_GENERAL);
             for (VkImage image : {vulkan_context.depth_image(), vulkan_context.motion_image(),
@@ -8086,7 +8088,9 @@ bool VulkanCommandProcessor::IssueCopy_ReadbackResolvePath() {
     deferred_command_buffer_.CmdVkBindDescriptorSets(VK_PIPELINE_BIND_POINT_COMPUTE,
                                                      resolve_downscale_pipeline_layout_, 0, 1,
                                                      &descriptor_set, 0, nullptr);
+    Checkpoint(CheckpointKind::kCompute, UINT32_MAX, "resolve downscale");
     deferred_command_buffer_.CmdVkDispatch(tile_count, 1, 1);
+    Checkpoint(CheckpointKind::kCompute, UINT32_MAX, "resolve downscale end");
 
     VkBufferMemoryBarrier downscale_barrier = {};
     downscale_barrier.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
@@ -9148,11 +9152,15 @@ void VulkanCommandProcessor::NoteCheckpoint(std::string detail) {
 }
 
 void VulkanCommandProcessor::LogCheckpoints() {
-  // Once: every later wait or submission reports the same loss.
-  static std::atomic<bool> logged{false};
-  if (!checkpoints_enabled_ || logged.exchange(true)) {
+  // Once: every later wait or submission reports the same loss. Another thread that also saw the
+  // loss waits here, as it ends the process right after, which would cut this report short.
+  static std::mutex logged_mutex;
+  static bool logged = false;
+  std::lock_guard<std::mutex> logged_lock(logged_mutex);
+  if (!checkpoints_enabled_ || logged) {
     return;
   }
+  logged = true;
   const ui::vulkan::VulkanDevice* const vulkan_device = GetVulkanDevice();
   const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
   ui::vulkan::VulkanDevice::Queue::Acquisition queue_acquisition =
@@ -9167,8 +9175,13 @@ void VulkanCommandProcessor::LogCheckpoints() {
   dfn.vkGetQueueCheckpointDataNV(queue_acquisition.queue(), &count, checkpoints.data());
   static const char* const kKinds[] = {"?",        "draw",     "copy",     "texture load",
                                        "resolve",  "transfer", "clear",    "draw end",
-                                       "texture load end", "note"};
+                                       "texture load end", "note", "compute"};
   auto describe = [&](uint64_t serial) {
+    if (serial >> 63) {
+      static const char* const kPaintStages[] = {"paint", "upscale", "upscale end", "paint end"};
+      return fmt::format("presenter {} (submission {})", kPaintStages[serial & 3],
+                         (serial << 1) >> 9);
+    }
     const CheckpointRecord& record = checkpoint_records_[serial & (kCheckpointRecords - 1)];
     if (record.serial != serial) {
       return fmt::format("#{} (no longer recorded)", serial);
@@ -9184,6 +9197,7 @@ void VulkanCommandProcessor::LogCheckpoints() {
   for (uint32_t i = 0; i < count; ++i) {
     const uint64_t serial = uint64_t(uintptr_t(checkpoints[i].pCheckpointMarker));
     REXGPU_ERROR("  stage {:08X}: {}", uint32_t(checkpoints[i].stage), describe(serial));
+    if (serial >> 63) continue;
     if (checkpoints[i].stage & VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT) finished = serial;
     if (checkpoints[i].stage & VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT) begun = serial;
   }

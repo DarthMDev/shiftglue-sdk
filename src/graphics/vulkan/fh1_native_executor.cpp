@@ -1893,8 +1893,10 @@ void Fh1NativeExecutor::FlushDepthTransfers(Surface& dest, size_t first, size_t 
           dest.samples, 0};
       command_buffer.CmdVkPushConstants(compute_pipeline_layout_, VK_SHADER_STAGE_COMPUTE_BIT, 0,
                                         sizeof(constants), constants);
+      command_processor_.Checkpoint(VulkanCommandProcessor::CheckpointKind::kCompute, UINT32_MAX, "transfer words");
       command_buffer.CmdVkDispatch((uint32_t(rect.right - rect.left) + 7) / 8,
                                    (uint32_t(rect.bottom - rect.top) + 7) / 8, 1);
+      command_processor_.Checkpoint(VulkanCommandProcessor::CheckpointKind::kCompute, UINT32_MAX, "transfer words end");
     }
   }
   command_processor_.PushBufferMemoryBarrier(
