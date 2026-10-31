@@ -706,7 +706,7 @@ bool Fh1NativeExecutor::EnsureCameraDepthPipelines() {
     return false;
   }
   VkPushConstantRange push_constant_range = {VK_SHADER_STAGE_COMPUTE_BIT, 0,
-                                             sizeof(uint32_t) * 3};
+                                             sizeof(uint32_t) * 4};
   VkPipelineLayoutCreateInfo pipeline_layout_info = {};
   pipeline_layout_info.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
   pipeline_layout_info.setLayoutCount = 1;

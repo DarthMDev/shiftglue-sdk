@@ -1002,6 +1002,8 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
     if (device->extensions_.ext_KHR_external_semaphore_win32) {
       XE_UI_VULKAN_FEATURE_2(features_1_2, timelineSemaphore);
     }
+    // DLSS allocates and takes the addresses of device-address memory.
+    features_1_2.enabled.bufferDeviceAddress = features_1_2.supported.bufferDeviceAddress;
   } else {
     if (ext_1_2_KHR_sampler_mirror_clamp_to_edge) {
       XE_UI_VULKAN_FEATURE_IMPLIED(samplerMirrorClampToEdge)
