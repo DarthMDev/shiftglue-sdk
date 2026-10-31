@@ -1,6 +1,7 @@
 #include <rex/graphics/vulkan/fh1_native_executor.h>
 
 #include <algorithm>
+#include <unordered_map>
 #include <unordered_set>
 #include <mutex>
 #include <cstdio>
@@ -3092,12 +3093,18 @@ void LogSkippedResolve(const Fh1ResolvePlan& plan) {
 namespace {
 // fh1_trace_resolve_cpu_accesses: guest CPU accesses of armed resolved ranges.
 void LogResolvedRangeAccess(void*, uint32_t physical_address, uint32_t length, bool is_write) {
-  static std::atomic<uint32_t> logs{0};
-  static std::atomic<uint32_t> repeats[256];
+  // Per page and direction: a hashed bucket shared by every page let a load's burst of writes
+  // silence later reads of an unrelated range for the whole session.
+  static std::mutex mutex;
+  static std::unordered_map<uint64_t, uint32_t> repeats;
+  static uint32_t logs = 0;
   const uint32_t address = memory::CurrentAccessFaultVirtualAddress();
-  if (repeats[((address >> 12) ^ uint32_t(is_write)) & 255].fetch_add(1) % 64 ||
-      logs.fetch_add(1) >= 1000) {
-    return;
+  {
+    std::lock_guard<std::mutex> lock(mutex);
+    if (repeats[(uint64_t(address >> 12) << 1) | uint32_t(is_write)]++ >= 8 || logs >= 4000) {
+      return;
+    }
+    ++logs;
   }
   const auto* thread_state = runtime::ThreadState::Get();
   const PPCContext* context = thread_state ? thread_state->context() : nullptr;
