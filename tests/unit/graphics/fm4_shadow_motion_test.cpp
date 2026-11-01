@@ -66,6 +66,16 @@ TEST_CASE("The car's shadow map pass is orthographic, the scene is not", "[shado
   CHECK_FALSE(Fm4OrthographicMatrix(Floats(Multiply(Projection(), Translate(0, -1.5, 0)))));
 }
 
+TEST_CASE("Only the player car's shadow map pass counts, not other cars'", "[shadow_motion]") {
+  // The player car's goes to the variance map (16_16); other cars' to 8_8_8_8 maps of their own,
+  // whose meshes outvoted the player car's in races with AI.
+  const auto sun = Floats(Sun(3.0, 40.0));
+  CHECK(Fm4CarShadowMapDraw(sun, xenos::ColorRenderTargetFormat::k_16_16));
+  CHECK_FALSE(Fm4CarShadowMapDraw(sun, xenos::ColorRenderTargetFormat::k_8_8_8_8));
+  CHECK_FALSE(Fm4CarShadowMapDraw(Floats(Multiply(Projection(), Translate(0, -1.5, 0))),
+                                  xenos::ColorRenderTargetFormat::k_16_16));
+}
+
 TEST_CASE("The ground shadow takes the slot most of the car's meshes share", "[shadow_motion]") {
   // The body's panels share the car's motion; the driver and a mirror got slots of their own.
   CHECK(Fm4ShadowSlot({7, 7, 9, 7, 12, 7}) == 7);

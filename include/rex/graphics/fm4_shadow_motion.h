@@ -22,12 +22,20 @@
 #include <cstdint>
 #include <vector>
 
+#include <rex/graphics/xenos.h>
+
 namespace rex::graphics {
 
 // Whether a world-view-projection (row-major for column vectors, Fm4ObjectMatrix) is
 // orthographic: its w row is (0, 0, 0, 1). The car's shadow map pass draws the car so; the scene
 // and the reflection cube draw it in perspective.
 bool Fm4OrthographicMatrix(const std::array<float, 16>& wvp);
+
+// Whether a draw is the player car's shadow map pass: orthographic, into the variance map
+// (16_16). Other cars' shadow maps are orthographic too but 8_8_8_8; their meshes, drawn once
+// there and once in the scene, outvoted the player car's in races with AI.
+bool Fm4CarShadowMapDraw(const std::array<float, 16>& wvp,
+                         xenos::ColorRenderTargetFormat color_format);
 
 // The object slot the ground shadow moves with: of the scene slots of the car's meshes drawn in
 // both the shadow map pass and the scene, the one most share (the body's); 0 without one. Slot 0

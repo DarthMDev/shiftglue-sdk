@@ -17,6 +17,11 @@ bool Fm4OrthographicMatrix(const std::array<float, 16>& wvp) {
   return wvp[12] == 0.0f && wvp[13] == 0.0f && wvp[14] == 0.0f && wvp[15] == 1.0f;
 }
 
+bool Fm4CarShadowMapDraw(const std::array<float, 16>& wvp,
+                         xenos::ColorRenderTargetFormat color_format) {
+  return color_format == xenos::ColorRenderTargetFormat::k_16_16 && Fm4OrthographicMatrix(wvp);
+}
+
 uint32_t Fm4ShadowSlot(const std::vector<uint32_t>& scene_slots) {
   std::unordered_map<uint32_t, size_t> votes;
   uint32_t best = 0;

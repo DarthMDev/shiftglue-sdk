@@ -196,7 +196,8 @@ void Fh1NativeExecutor::NoteCameraDraw(const Fh1DrawInfo& draw) {
     const std::array<float, 16> wvp = Fm4ObjectMatrix(registers);
     const bool reads_world = Fm4ReadsWorldMatrix(std::to_array(map.float_bitmap));
     if (SceneObjectMatrixRegister(*draw.vertex_shader) != kObjectFirstRegister) {
-      if (shadow_motion_enabled_ && Fm4OrthographicMatrix(wvp)) {
+      if (shadow_motion_enabled_ &&
+          Fm4CarShadowMapDraw(wvp, register_file_.Get<reg::RB_COLOR_INFO>().color_format)) {
         NoteShadowPart(shadow_map_parts_, draw, 0);
       }
       if (decal_motion_enabled_ && reads_world && camera_scene_depth_valid_ &&
