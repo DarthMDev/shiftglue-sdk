@@ -99,14 +99,16 @@ REXCVAR_DEFINE_BOOL(present_upscaler_reactive_shadows, false, "GPU",
                     "present_upscaler_object_motion)");
 
 REXCVAR_DEFINE_BOOL(present_upscaler_shadow_motion, true, "GPU",
-                    "Give a temporal upscaler no history where the car's ground shadow's edges "
-                    "moved over the ground (FM4): with the ground's motion there, DLSS drew thin "
-                    "light lines across the shadow in reverse look and preset M black blocks");
+                    "Give a temporal upscaler the history of the road the other way, or none, "
+                    "where the car's ground shadow's edges moved over the ground (FM4): with the "
+                    "ground's motion there, DLSS drew thin light lines across the shadow in reverse "
+                    "look and preset M black blocks");
 
 REXCVAR_DEFINE_BOOL(present_upscaler_uncovered_ground, true, "GPU",
-                    "Give a temporal upscaler no history where the ground was under the car a "
-                    "frame ago (FM4): DLSS took the car's lower body as its history, preset M a "
-                    "smudge behind the car at speed");
+                    "Give a temporal upscaler the history of the road the other way, or none, "
+                    "where the ground was under a car a frame ago (FM4): DLSS took the car's lower "
+                    "body or a tyre as its history, preset M a smudge or dark blocks behind the "
+                    "car at speed");
 
 REXCVAR_DEFINE_BOOL(present_upscaler_decal_motion, true, "GPU",
                     "Give a temporal upscaler other cars' ground shadows' motion as their "
@@ -3653,8 +3655,8 @@ layout(push_constant) uniform SwapCameraConstants {
   // debug view, bit 17 a scene drawn upright, bit 18 the reactive plane
   // written for the mask, bit 19 its debug view, bits 20-27 the ground
   // shadow's slot (0: none), bit 28 the third plane's ground shadow slots
-  // read, bit 29 their debug view, bit 30 the ground the car uncovered given
-  // no history; and the object slot depth (host) to the source depth's scale.
+  // read, bit 29 their debug view, bit 30 the ground a car uncovered treated
+  // as having no history; and the object slot depth (host) to the source depth's scale.
   uint object_count;
   float object_depth_scale;
   // FM4's mirror glass's slot (0: none). Its reflection has no motion an upscaler could
@@ -3802,8 +3804,7 @@ void main() {
   // shadow now at that place plus the car's motion relative to the ground. Where the two differ
   // (the band an edge swept over, as wide as the ground moves in a frame) no vector holds: the
   // ground's history is the other side of the edge (preset M: black blocks, K: light lines), the
-  // car's another piece of asphalt (a halo trailing the car, wider with speed). That asphalt is
-  // new to the upscaler, so it is told so: a vector off the screen, no history.
+  // car's another piece of asphalt (a halo trailing the car, wider with speed).
   bool shadow_swept = false;
   if (shadow_slot != 0u && shadow_slot < object_count) {
     vec4 ground_previous = reprojection * vec4(turn * ndc, z, 1.0);
@@ -3813,38 +3814,74 @@ void main() {
                                 car_previous.xy / car_previous.w);
       ivec2 then_pixel = pixel + ivec2(round(offset_ndc * vec2(0.5, -0.5) * vec2(c.size)));
       ivec2 then_scene = upright ? then_pixel : ivec2(c.size) - 1 - then_pixel;
-      // Within a tenth of the distance: the same surface, not a car in front of it.
+      // Within a tenth of the distance it had there: the same surface, not a car in front of it.
+      // At speed that place is far up the screen, where the ground's own depth is another.
+      float then_z = 1.0 - ground_previous.z / ground_previous.w;
       shadow_swept = all(greaterThanEqual(then_scene, ivec2(0))) &&
                      all(lessThan(then_scene, slots_size)) &&
-                     abs(texelFetch(source_depth, then_scene, 0).r - stored_z) <
-                         stored_z * 0.1 + (1.0 / 65536.0) &&
+                     abs(texelFetch(source_depth, then_scene, 0).r - then_z) <
+                         then_z * 0.1 + (1.0 / 65536.0) &&
                      abs(ShadowDepth(then_scene, slots_size) - plane_value) > 0.05;
     }
   }
   vec4 previous = reprojection * vec4(turn * ndc, z, 1.0);
   vec2 motion_uv = vec2(0.0);
-  if (shadow_swept) {
-    motion_uv = vec2(2.0);
-  } else if (previous.w > 1.0e-6) {
+  if (previous.w > 1.0e-6) {
     vec2 previous_ndc = turn * previous.xy / previous.w;
     motion_uv = vec2(previous_ndc.x * 0.5 + 0.5, 0.5 - previous_ndc.y * 0.5) - uv;
   }
+  vec2 motion_pixels = motion_uv * vec2(c.size);
   // At speed the ground behind the car moves out from under it by tens of pixels a frame. Its
   // place a frame ago shows the car's lower body, at about the ground's depth, and DLSS took
   // that as its history: preset M smudged the strip after it, a copy of the diffuser on the
-  // road. The car hardly moves on the screen, so where it is now stands for where it was.
-  if (((c.object_count >> 30u) & 1u) != 0u && shadow_slot != 0u && pixel_slot != shadow_slot &&
-      !shadow_swept && previous.w > 1.0e-6) {
-    ivec2 then_pixel = pixel + ivec2(round(motion_uv * vec2(c.size)));
+  // road, and a dark block further out with speed where that place shows a tyre. Any object that
+  // moves less on the screen than this pixel (a car under its camera), and otherwise than the
+  // camera (not a prop standing on the ground), stands for where it was a frame ago.
+  bool uncovered = false;
+  if (((c.object_count >> 30u) & 1u) != 0u && !shadow_swept && previous.w > 1.0e-6) {
+    ivec2 then_pixel = pixel + ivec2(round(motion_pixels));
     ivec2 then_scene = upright ? then_pixel : ivec2(c.size) - 1 - then_pixel;
     if (all(greaterThanEqual(then_scene, ivec2(0))) && all(lessThan(then_scene, slots_size))) {
       uint key = imageLoad(object_slots, then_scene).r;
-      if ((key & 0xFFu) == shadow_slot &&
-          abs(float(key >> 8u) * (c.object_depth_scale / 16777215.0) -
-              texelFetch(source_depth, then_scene, 0).r) < (1.0 / 65536.0)) {
-        motion_uv = vec2(2.0);
+      uint then_slot = key & 0xFFu;
+      float then_slot_z = float(key >> 8u) * (c.object_depth_scale / 16777215.0);
+      float then_stored_z = texelFetch(source_depth, then_scene, 0).r;
+      bool then_near_mask = then_stored_z > 1.0 - (1.0 / 65536.0);
+      if (then_slot != 0u && then_slot < object_count && then_slot != pixel_slot &&
+          (then_near_mask || abs(then_slot_z - then_stored_z) < (1.0 / 65536.0))) {
+        vec2 then_uv = (vec2(then_pixel) + 0.5) * c.size_inv;
+        vec2 then_ndc = vec2(then_uv.x * 2.0 - 1.0, 1.0 - then_uv.y * 2.0);
+        vec4 then_object = object_reprojections[then_slot] *
+                           vec4(turn * then_ndc, 1.0 - then_slot_z, 1.0);
+        vec4 then_camera = c.reprojection * vec4(turn * then_ndc, 1.0 - then_slot_z, 1.0);
+        if (then_object.w > 1.0e-6 && then_camera.w > 1.0e-6) {
+          vec2 object_motion = (turn * then_object.xy / then_object.w - then_ndc) *
+                               vec2(0.5, -0.5) * vec2(c.size);
+          vec2 camera_motion = (turn * then_camera.xy / then_camera.w - then_ndc) *
+                               vec2(0.5, -0.5) * vec2(c.size);
+          uncovered = length(object_motion) < 0.5 * length(motion_pixels) &&
+                      length(object_motion - camera_motion) > 0.25 * length(motion_pixels);
+        }
       }
     }
+  }
+  // Such ground has no history of its own, and without any the raw frame's grain boils in a thick
+  // border around the car, longer behind it with speed. The road as far the other way is equally
+  // grainy and has had time to settle, so its history stands in where it is lit alike and no
+  // object lies on it; else a vector off the screen tells the upscaler there is none.
+  if (shadow_swept || uncovered) {
+    bool borrow = false;
+    ivec2 mirror_pixel = pixel - ivec2(round(motion_pixels));
+    ivec2 mirror_scene = upright ? mirror_pixel : ivec2(c.size) - 1 - mirror_pixel;
+    if (pixel_slot == 0u && all(greaterThanEqual(mirror_scene, ivec2(0))) &&
+        all(lessThan(mirror_scene, slots_size))) {
+      uint key = imageLoad(object_slots, mirror_scene).r;
+      bool on_object = (key & 0xFFu) != 0u &&
+                       abs(float(key >> 8u) * (c.object_depth_scale / 16777215.0) -
+                           texelFetch(source_depth, mirror_scene, 0).r) < (1.0 / 65536.0);
+      borrow = !on_object && abs(ShadowDepth(mirror_scene, slots_size) - plane_value) <= 0.05;
+    }
+    motion_uv = borrow ? -motion_uv : vec2(2.0);
   }
   imageStore(depth, pixel, vec4(z, 0.0, 0.0, 0.0));
   imageStore(motion, pixel, vec4(motion_uv, 0.0, 0.0));
