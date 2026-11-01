@@ -99,8 +99,9 @@ REXCVAR_DEFINE_BOOL(present_upscaler_reactive_shadows, false, "GPU",
                     "present_upscaler_object_motion)");
 
 REXCVAR_DEFINE_BOOL(present_upscaler_shadow_motion, true, "GPU",
-                    "Give a temporal upscaler the car's ground shadow's own motion (FM4): with "
-                    "the ground's, DLSS drew thin light lines across the shadow in reverse look");
+                    "Give a temporal upscaler no history where the car's ground shadow's edges "
+                    "moved over the ground (FM4): with the ground's motion there, DLSS drew thin "
+                    "light lines across the shadow in reverse look and preset M black blocks");
 
 REXCVAR_DEFINE_BOOL(present_upscaler_decal_motion, true, "GPU",
                     "Give a temporal upscaler other cars' ground shadows' motion as their "
@@ -3668,6 +3669,15 @@ layout(set = 0, binding = 4, std430) readonly buffer ObjectReprojections {
 };
 layout(set = 0, binding = 5, r8) writeonly uniform image2D reactive;
 layout(set = 0, binding = 6, rgb10_a2) uniform image2D hudless;
+// The reactive plane's value at a scene pixel where its fragment is not behind the scene depth.
+float ShadowDepth(ivec2 scene_pixel, ivec2 slots_size) {
+  uint key = imageLoad(object_slots, scene_pixel + ivec2(0, slots_size.y)).r;
+  if (key == 0u || float(key >> 8u) * (c.object_depth_scale / 16777215.0) <=
+                       texelFetch(source_depth, scene_pixel, 0).r - (1.0 / 65536.0)) {
+    return 0.0;
+  }
+  return float(key & 0xFFu) / 255.0;
+}
 void main() {
   ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
   if (any(greaterThanEqual(uvec2(pixel), c.size))) {
@@ -3691,11 +3701,7 @@ void main() {
   uint shadow_slot = (c.object_count >> 20u) & 0xFFu;
   float plane_value = 0.0;
   if ((reactive_output || shadow_slot != 0u) && all(lessThan(scene_pixel, slots_size))) {
-    uint key = imageLoad(object_slots, scene_pixel + ivec2(0, slots_size.y)).r;
-    if (key != 0u &&
-        float(key >> 8u) * (c.object_depth_scale / 16777215.0) > stored_z - (1.0 / 65536.0)) {
-      plane_value = float(key & 0xFFu) / 255.0;
-    }
+    plane_value = ShadowDepth(scene_pixel, slots_size);
   }
   float reactive_value = reactive_output ? plane_value : 0.0;
   imageStore(reactive, pixel, vec4(reactive_value, 0.0, 0.0, 0.0));
@@ -3782,15 +3788,37 @@ void main() {
       reprojection = object_reprojections[slot];
     }
   }
-  // The car's ground shadow moves with the car, not with the ground it falls on.
-  if (shadow_slot != 0u && shadow_slot < object_count && plane_value > 0.02) {
-    reprojection = object_reprojections[shadow_slot];
-  }
   vec2 uv = (vec2(pixel) + 0.5) * c.size_inv;
   vec2 ndc = vec2(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0);
+  // The car's ground shadow moves with the car, the asphalt it darkens with the ground. The
+  // ground's vector holds wherever the shadow was a frame ago as deep where the ground was: the
+  // shadow now at that place plus the car's motion relative to the ground. Where the two differ
+  // (the band an edge swept over, as wide as the ground moves in a frame) no vector holds: the
+  // ground's history is the other side of the edge (preset M: black blocks, K: light lines), the
+  // car's another piece of asphalt (a halo trailing the car, wider with speed). That asphalt is
+  // new to the upscaler, so it is told so: a vector off the screen, no history.
+  bool shadow_swept = false;
+  if (shadow_slot != 0u && shadow_slot < object_count) {
+    vec4 ground_previous = reprojection * vec4(turn * ndc, z, 1.0);
+    vec4 car_previous = object_reprojections[shadow_slot] * vec4(turn * ndc, z, 1.0);
+    if (ground_previous.w > 1.0e-6 && car_previous.w > 1.0e-6) {
+      vec2 offset_ndc = turn * (ground_previous.xy / ground_previous.w -
+                                car_previous.xy / car_previous.w);
+      ivec2 then_pixel = pixel + ivec2(round(offset_ndc * vec2(0.5, -0.5) * vec2(c.size)));
+      ivec2 then_scene = upright ? then_pixel : ivec2(c.size) - 1 - then_pixel;
+      // Within a tenth of the distance: the same surface, not a car in front of it.
+      shadow_swept = all(greaterThanEqual(then_scene, ivec2(0))) &&
+                     all(lessThan(then_scene, slots_size)) &&
+                     abs(texelFetch(source_depth, then_scene, 0).r - stored_z) <
+                         stored_z * 0.1 + (1.0 / 65536.0) &&
+                     abs(ShadowDepth(then_scene, slots_size) - plane_value) > 0.05;
+    }
+  }
   vec4 previous = reprojection * vec4(turn * ndc, z, 1.0);
   vec2 motion_uv = vec2(0.0);
-  if (previous.w > 1.0e-6) {
+  if (shadow_swept) {
+    motion_uv = vec2(2.0);
+  } else if (previous.w > 1.0e-6) {
     vec2 previous_ndc = turn * previous.xy / previous.w;
     motion_uv = vec2(previous_ndc.x * 0.5 + 0.5, 0.5 - previous_ndc.y * 0.5) - uv;
   }
