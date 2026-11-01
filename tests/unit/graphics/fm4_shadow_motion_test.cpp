@@ -76,17 +76,28 @@ TEST_CASE("Only the player car's shadow map pass counts, not other cars'", "[sha
                                   xenos::ColorRenderTargetFormat::k_16_16));
 }
 
-TEST_CASE("The ground shadow takes the slot most of the car's meshes share", "[shadow_motion]") {
-  // The body's panels share the car's motion; the driver and a mirror got slots of their own.
-  CHECK(Fm4ShadowSlot({7, 7, 9, 7, 12, 7}) == 7);
+TEST_CASE("The ground shadow takes the body's slot, not a part drawn once", "[shadow_motion]") {
+  // A Le Mans replay with AI: one vertex buffer holds several of the body's panels, each its own
+  // draw, while a part alone in its buffer had a slot of its own and was the only mesh drawn once.
+  CHECK(Fm4ShadowSlot({0x10, 0x20, 0x30}, {{0x10, {7, 7, 7, 7}}, {0x20, {7, 7}}, {0x30, {8}}}) == 7);
+}
+
+TEST_CASE("A mesh other cars share votes once for each of them", "[shadow_motion]") {
+  // The driver: drawn in the player car's shadow map and in all six cars of the scene.
+  CHECK(Fm4ShadowSlot({0x10, 0x40},
+                      {{0x10, {7, 7, 7}}, {0x40, {1, 14, 27, 40, 53, 7}}}) == 7);
+}
+
+TEST_CASE("Only meshes of the shadow map pass vote for the ground shadow's slot", "[shadow_motion]") {
+  CHECK(Fm4ShadowSlot({0x10}, {{0x10, {7}}, {0x50, {9, 9, 9}}}) == 7);
 }
 
 TEST_CASE("Meshes new this frame do not vote for the ground shadow's slot", "[shadow_motion]") {
   // Slot 0 is the camera's motion, which the shadow does not have.
-  CHECK(Fm4ShadowSlot({0, 0, 0, 4, 4}) == 4);
+  CHECK(Fm4ShadowSlot({0x10}, {{0x10, {0, 0, 0, 4, 4}}}) == 4);
 }
 
 TEST_CASE("No slotted mesh gives the ground shadow no slot", "[shadow_motion]") {
-  CHECK(Fm4ShadowSlot({}) == 0);
-  CHECK(Fm4ShadowSlot({0, 0}) == 0);
+  CHECK(Fm4ShadowSlot({}, {}) == 0);
+  CHECK(Fm4ShadowSlot({0x10}, {{0x10, {0, 0}}}) == 0);
 }

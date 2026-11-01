@@ -198,7 +198,7 @@ void Fh1NativeExecutor::NoteCameraDraw(const Fh1DrawInfo& draw) {
     if (SceneObjectMatrixRegister(*draw.vertex_shader) != kObjectFirstRegister) {
       if (shadow_motion_enabled_ &&
           Fm4CarShadowMapDraw(wvp, register_file_.Get<reg::RB_COLOR_INFO>().color_format)) {
-        NoteShadowPart(shadow_map_parts_, draw, 0);
+        shadow_map_meshes_.insert(DrawVertexBuffer(draw));
       }
       if (decal_motion_enabled_ && reads_world && camera_scene_depth_valid_ &&
           Fm4ShadowDecalDraw(register_file_.values[XE_GPU_REG_RB_DEPTHCONTROL],
@@ -230,7 +230,9 @@ void Fh1NativeExecutor::NoteCameraDraw(const Fh1DrawInfo& draw) {
     if (decal_motion_enabled_ && reads_world && current_object_slot_) {
       object_slot_by_world_.emplace(WorldMatrixKey(), current_object_slot_);
     }
-    if (shadow_motion_enabled_) NoteShadowPart(shadow_scene_parts_, draw, current_object_slot_);
+    if (shadow_motion_enabled_) {
+      shadow_scene_slots_[DrawVertexBuffer(draw)].push_back(current_object_slot_);
+    }
     if (mirror) current_object_slot_ = MirrorSlot(current_object_slot_);
     return;
   }
@@ -312,34 +314,23 @@ uint64_t Fh1NativeExecutor::DrawObjectKey(const Fh1DrawInfo& draw) const {
   return object;
 }
 
-void Fh1NativeExecutor::NoteShadowPart(std::unordered_map<uint32_t, ShadowPart>& parts,
-                                       const Fh1DrawInfo& draw, uint32_t slot) {
+uint32_t Fh1NativeExecutor::DrawVertexBuffer(const Fh1DrawInfo& draw) const {
   // The car's shadow map pass draws its meshes with shaders of its own, from the same vertex
   // buffers.
   const auto& bindings = draw.vertex_shader->vertex_bindings();
-  if (bindings.empty()) return;
-  ShadowPart& part =
-      parts[register_file_.GetVertexFetch(bindings.front().fetch_constant).address];
-  part.slot = slot;
-  ++part.draws;
+  return bindings.empty()
+             ? 0
+             : register_file_.GetVertexFetch(bindings.front().fetch_constant).address;
 }
 
 uint32_t Fh1NativeExecutor::TakeShadowSlot() {
-  // Meshes drawn once in each: a wheel mesh is drawn at all four corners.
-  std::vector<uint32_t> slots;
-  for (const auto& [address, shadow] : shadow_map_parts_) {
-    const auto scene = shadow_scene_parts_.find(address);
-    if (shadow.draws == 1 && scene != shadow_scene_parts_.end() && scene->second.draws == 1) {
-      slots.push_back(scene->second.slot);
-    }
-  }
-  const uint32_t slot = Fm4ShadowSlot(slots);
+  const uint32_t slot = Fm4ShadowSlot(shadow_map_meshes_, shadow_scene_slots_);
   if ((frame_ % 600) == 0 && shadow_motion_enabled_) {
-    REXGPU_INFO("FH1 camera: ground shadow in slot {} from {} of {} shadow map meshes", slot,
-                slots.size(), shadow_map_parts_.size());
+    REXGPU_INFO("FH1 camera: ground shadow in slot {} of {} shadow map meshes", slot,
+                shadow_map_meshes_.size());
   }
-  shadow_map_parts_.clear();
-  shadow_scene_parts_.clear();
+  shadow_map_meshes_.clear();
+  shadow_scene_slots_.clear();
   return slot;
 }
 

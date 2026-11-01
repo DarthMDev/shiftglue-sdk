@@ -16,6 +16,7 @@
 #include <string>
 #include <tuple>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include <rex/graphics/fh1_depth_overwrite.h>
@@ -656,16 +657,11 @@ class Fh1NativeExecutor {
   uint32_t object_mirror_slot_ready_ = 0;
   bool SamplesMirror(const Shader& pixel_shader) const;
   uint32_t MirrorSlot(uint32_t slot);
-  // The car's meshes this frame by vertex buffer: their object slots in the scene, and how
-  // often each was drawn there and in the shadow map pass (once to be matched; Fm4ShadowSlot).
-  struct ShadowPart {
-    uint32_t slot = 0;
-    uint32_t draws = 0;
-  };
-  std::unordered_map<uint32_t, ShadowPart> shadow_scene_parts_;
-  std::unordered_map<uint32_t, ShadowPart> shadow_map_parts_;
-  void NoteShadowPart(std::unordered_map<uint32_t, ShadowPart>& parts, const Fh1DrawInfo& draw,
-                      uint32_t slot);
+  // This frame's vertex buffers: those of the shadow map pass, and the object slot of each of
+  // their draws in the scene (Fm4ShadowSlot).
+  std::unordered_set<uint32_t> shadow_map_meshes_;
+  std::unordered_map<uint32_t, std::vector<uint32_t>> shadow_scene_slots_;
+  uint32_t DrawVertexBuffer(const Fh1DrawInfo& draw) const;
   uint32_t TakeShadowSlot();
   uint32_t AssignObjectSlot(uint64_t object, const std::array<float, 16>& wvp,
                             const std::optional<std::array<float, 16>>& world);

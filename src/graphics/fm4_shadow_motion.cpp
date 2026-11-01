@@ -9,8 +9,6 @@
  */
 #include <rex/graphics/fm4_shadow_motion.h>
 
-#include <unordered_map>
-
 namespace rex::graphics {
 
 bool Fm4OrthographicMatrix(const std::array<float, 16>& wvp) {
@@ -22,12 +20,17 @@ bool Fm4CarShadowMapDraw(const std::array<float, 16>& wvp,
   return color_format == xenos::ColorRenderTargetFormat::k_16_16 && Fm4OrthographicMatrix(wvp);
 }
 
-uint32_t Fm4ShadowSlot(const std::vector<uint32_t>& scene_slots) {
+uint32_t Fm4ShadowSlot(const std::unordered_set<uint32_t>& shadow_map_meshes,
+                       const std::unordered_map<uint32_t, std::vector<uint32_t>>& scene_slots) {
   std::unordered_map<uint32_t, size_t> votes;
   uint32_t best = 0;
-  for (const uint32_t slot : scene_slots) {
-    if (!slot) continue;
-    if (++votes[slot] > (best ? votes[best] : 0)) best = slot;
+  for (const uint32_t mesh : shadow_map_meshes) {
+    const auto scene = scene_slots.find(mesh);
+    if (scene == scene_slots.end()) continue;
+    for (const uint32_t slot : scene->second) {
+      if (!slot) continue;
+      if (++votes[slot] > (best ? votes[best] : 0)) best = slot;
+    }
   }
   return best;
 }

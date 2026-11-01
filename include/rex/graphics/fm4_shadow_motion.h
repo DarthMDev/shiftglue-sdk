@@ -20,6 +20,8 @@
 
 #include <array>
 #include <cstdint>
+#include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include <rex/graphics/xenos.h>
@@ -37,9 +39,12 @@ bool Fm4OrthographicMatrix(const std::array<float, 16>& wvp);
 bool Fm4CarShadowMapDraw(const std::array<float, 16>& wvp,
                          xenos::ColorRenderTargetFormat color_format);
 
-// The object slot the ground shadow moves with: of the scene slots of the car's meshes drawn in
-// both the shadow map pass and the scene, the one most share (the body's); 0 without one. Slot 0
-// (the camera's motion, meshes new this frame) does not vote.
-uint32_t Fm4ShadowSlot(const std::vector<uint32_t>& scene_slots);
+// The object slot the ground shadow moves with: of the scene draws of the vertex buffers the
+// shadow map pass draws, the slot most share (the body's); 0 without one. A vertex buffer holds
+// several of a car's parts, so counting only those drawn once left a part with a slot of its own,
+// and the ground followed it instead of the body. Slot 0 (the camera's motion, meshes new this
+// frame) does not vote.
+uint32_t Fm4ShadowSlot(const std::unordered_set<uint32_t>& shadow_map_meshes,
+                       const std::unordered_map<uint32_t, std::vector<uint32_t>>& scene_slots);
 
 }  // namespace rex::graphics
