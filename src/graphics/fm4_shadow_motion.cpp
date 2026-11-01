@@ -25,6 +25,7 @@ uint32_t Fm4ShadowSlot(const std::unordered_set<uint32_t>& shadow_map_meshes,
   std::unordered_map<uint32_t, size_t> votes;
   uint32_t best = 0;
   for (const uint32_t mesh : shadow_map_meshes) {
+    if (!mesh) continue;
     const auto scene = scene_slots.find(mesh);
     if (scene == scene_slots.end()) continue;
     for (const uint32_t slot : scene->second) {

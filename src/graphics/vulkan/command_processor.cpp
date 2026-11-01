@@ -3655,8 +3655,9 @@ layout(push_constant) uniform SwapCameraConstants {
   // debug view, bit 17 a scene drawn upright, bit 18 the reactive plane
   // written for the mask, bit 19 its debug view, bits 20-27 the ground
   // shadow's slot (0: none), bit 28 the third plane's ground shadow slots
-  // read, bit 29 their debug view, bit 30 the ground a car uncovered treated
-  // as having no history; and the object slot depth (host) to the source depth's scale.
+  // read, bit 29 their debug view, bit 30 the ground a car uncovered given the
+  // road's history the other way, or none; and the object slot depth (host) to the source
+  // depth's scale.
   uint object_count;
   float object_depth_scale;
   // FM4's mirror glass's slot (0: none). Its reflection has no motion an upscaler could
@@ -3707,7 +3708,11 @@ void main() {
   bool reactive_output = ((c.object_count >> 18u) & 1u) != 0u;
   uint shadow_slot = (c.object_count >> 20u) & 0xFFu;
   float plane_value = 0.0;
-  if ((reactive_output || shadow_slot != 0u) && all(lessThan(scene_pixel, slots_size))) {
+  // Also for ground a car uncovered: it borrows history only from road lit alike, and the plane
+  // holds the car's shadow even in frames that found no shadow slot.
+  bool uncovered_wanted = ((c.object_count >> 30u) & 1u) != 0u;
+  if ((reactive_output || shadow_slot != 0u || uncovered_wanted) &&
+      all(lessThan(scene_pixel, slots_size))) {
     plane_value = ShadowDepth(scene_pixel, slots_size);
   }
   float reactive_value = reactive_output ? plane_value : 0.0;
@@ -3838,7 +3843,7 @@ void main() {
   // moves less on the screen than this pixel (a car under its camera), and otherwise than the
   // camera (not a prop standing on the ground), stands for where it was a frame ago.
   bool uncovered = false;
-  if (((c.object_count >> 30u) & 1u) != 0u && !shadow_swept && previous.w > 1.0e-6) {
+  if (uncovered_wanted && object_count != 0u && !shadow_swept && previous.w > 1.0e-6) {
     ivec2 then_pixel = pixel + ivec2(round(motion_pixels));
     ivec2 then_scene = upright ? then_pixel : ivec2(c.size) - 1 - then_pixel;
     if (all(greaterThanEqual(then_scene, ivec2(0))) && all(lessThan(then_scene, slots_size))) {

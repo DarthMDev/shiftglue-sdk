@@ -97,6 +97,11 @@ TEST_CASE("Meshes new this frame do not vote for the ground shadow's slot", "[sh
   CHECK(Fm4ShadowSlot({0x10}, {{0x10, {0, 0, 0, 4, 4}}}) == 4);
 }
 
+TEST_CASE("Draws without a vertex buffer do not vote for the ground shadow's slot",
+          "[shadow_motion]") {
+  CHECK(Fm4ShadowSlot({0, 0x10}, {{0, {5, 5, 5}}, {0x10, {7}}}) == 7);
+}
+
 TEST_CASE("No slotted mesh gives the ground shadow no slot", "[shadow_motion]") {
   CHECK(Fm4ShadowSlot({}, {}) == 0);
   CHECK(Fm4ShadowSlot({0x10}, {{0x10, {0, 0}}}) == 0);

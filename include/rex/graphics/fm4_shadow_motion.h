@@ -43,7 +43,7 @@ bool Fm4CarShadowMapDraw(const std::array<float, 16>& wvp,
 // shadow map pass draws, the slot most share (the body's); 0 without one. A vertex buffer holds
 // several of a car's parts, so counting only those drawn once left a part with a slot of its own,
 // and the ground followed it instead of the body. Slot 0 (the camera's motion, meshes new this
-// frame) does not vote.
+// frame) does not vote, nor do draws without a vertex buffer (mesh 0).
 uint32_t Fm4ShadowSlot(const std::unordered_set<uint32_t>& shadow_map_meshes,
                        const std::unordered_map<uint32_t, std::vector<uint32_t>>& scene_slots);
 
