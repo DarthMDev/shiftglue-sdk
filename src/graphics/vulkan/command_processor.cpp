@@ -103,6 +103,11 @@ REXCVAR_DEFINE_BOOL(present_upscaler_shadow_motion, true, "GPU",
                     "moved over the ground (FM4): with the ground's motion there, DLSS drew thin "
                     "light lines across the shadow in reverse look and preset M black blocks");
 
+REXCVAR_DEFINE_BOOL(present_upscaler_uncovered_ground, true, "GPU",
+                    "Give a temporal upscaler no history where the ground was under the car a "
+                    "frame ago (FM4): DLSS took the car's lower body as its history, preset M a "
+                    "smudge behind the car at speed");
+
 REXCVAR_DEFINE_BOOL(present_upscaler_decal_motion, true, "GPU",
                     "Give a temporal upscaler other cars' ground shadows' motion as their "
                     "parts' (FM4): with the ground's, DLAA trailed them behind the cars and "
@@ -3648,8 +3653,8 @@ layout(push_constant) uniform SwapCameraConstants {
   // debug view, bit 17 a scene drawn upright, bit 18 the reactive plane
   // written for the mask, bit 19 its debug view, bits 20-27 the ground
   // shadow's slot (0: none), bit 28 the third plane's ground shadow slots
-  // read, bit 29 their debug view; and the object slot depth (host) to the
-  // source depth's scale.
+  // read, bit 29 their debug view, bit 30 the ground the car uncovered given
+  // no history; and the object slot depth (host) to the source depth's scale.
   uint object_count;
   float object_depth_scale;
   // FM4's mirror glass's slot (0: none). Its reflection has no motion an upscaler could
@@ -3720,6 +3725,7 @@ void main() {
   // depth holds (not something drawn over it without a slot), moves with
   // its own reprojection.
   mat4 reprojection = c.reprojection;
+  uint pixel_slot = 0u;
   uint object_count = c.object_count & 0xFFFFu;
   if (((c.object_count >> 16u) & 1u) != 0u) {
     uint key = all(lessThan(scene_pixel, slots_size)) ? imageLoad(object_slots, scene_pixel).r : 0u;
@@ -3739,6 +3745,7 @@ void main() {
     if (slot != 0u && slot < object_count &&
         (near_mask || abs(slot_z - stored_z) < (1.0 / 65536.0))) {
       reprojection = object_reprojections[slot];
+      pixel_slot = slot;
       // Faded in over three pixels from the glass's rim, which stays the upscaler's: the
       // jittered frame around the glass moves over its edge pixels frame to frame, and a hard
       // border showed the render's pixel steps along the curved edges.
@@ -3821,6 +3828,23 @@ void main() {
   } else if (previous.w > 1.0e-6) {
     vec2 previous_ndc = turn * previous.xy / previous.w;
     motion_uv = vec2(previous_ndc.x * 0.5 + 0.5, 0.5 - previous_ndc.y * 0.5) - uv;
+  }
+  // At speed the ground behind the car moves out from under it by tens of pixels a frame. Its
+  // place a frame ago shows the car's lower body, at about the ground's depth, and DLSS took
+  // that as its history: preset M smudged the strip after it, a copy of the diffuser on the
+  // road. The car hardly moves on the screen, so where it is now stands for where it was.
+  if (((c.object_count >> 30u) & 1u) != 0u && shadow_slot != 0u && pixel_slot != shadow_slot &&
+      !shadow_swept && previous.w > 1.0e-6) {
+    ivec2 then_pixel = pixel + ivec2(round(motion_uv * vec2(c.size)));
+    ivec2 then_scene = upright ? then_pixel : ivec2(c.size) - 1 - then_pixel;
+    if (all(greaterThanEqual(then_scene, ivec2(0))) && all(lessThan(then_scene, slots_size))) {
+      uint key = imageLoad(object_slots, then_scene).r;
+      if ((key & 0xFFu) == shadow_slot &&
+          abs(float(key >> 8u) * (c.object_depth_scale / 16777215.0) -
+              texelFetch(source_depth, then_scene, 0).r) < (1.0 / 65536.0)) {
+        motion_uv = vec2(2.0);
+      }
+    }
   }
   imageStore(depth, pixel, vec4(z, 0.0, 0.0, 0.0));
   imageStore(motion, pixel, vec4(motion_uv, 0.0, 0.0));
@@ -4905,7 +4929,8 @@ void VulkanCommandProcessor::IssueSwapImpl(uint32_t frontbuffer_ptr, uint32_t fr
                 (object_slots_readable ? fh1_native_executor_->object_shadow_slot_ready() << 20
                                        : 0u) |
                 uint32_t(object_slots_readable && REXCVAR_GET(present_upscaler_decal_motion)) << 28 |
-                uint32_t(object_debug == 3) << 29;
+                uint32_t(object_debug == 3) << 29 |
+                uint32_t(REXCVAR_GET(present_upscaler_uncovered_ground)) << 30;
             if ((frame_current_ % 600) == 0) {
               REXGPU_INFO(
                   "Object motion: {} slots, {} slot draws, {} without the variant, {} reactive "
