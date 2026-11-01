@@ -196,6 +196,9 @@ class VulkanPresenter final : public Presenter {
   uint32_t GuestOutputJitterPhases() const override {
     return guest_output_jitter_phases_.load(std::memory_order_relaxed);
   }
+  bool GuestOutputPlainGroundMotion() const override {
+    return guest_output_plain_ground_motion_.load(std::memory_order_relaxed);
+  }
   // The formats of the guest output's camera images.
   static constexpr VkFormat kGuestOutputDepthFormat = VK_FORMAT_R32_SFLOAT;
   static constexpr VkFormat kGuestOutputMotionFormat = VK_FORMAT_R16G16_SFLOAT;
@@ -723,6 +726,8 @@ class VulkanPresenter final : public Presenter {
   std::atomic<bool> guest_output_camera_wanted_ = false;
   // UP-1.5: the jitter sequence length it wants, 0 for none.
   std::atomic<uint32_t> guest_output_jitter_phases_ = 0;
+  // Whether its provider wants FM4's ground to keep its own motion around the cars.
+  std::atomic<bool> guest_output_plain_ground_motion_ = false;
   // UP-1.2: draws the HUD over the upscale of the HUD-less copy
   // (upscale_hud_composite.cs.glsl), created on first use.
   bool EnsureUpscaleHudComposite();

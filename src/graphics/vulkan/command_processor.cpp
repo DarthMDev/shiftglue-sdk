@@ -102,13 +102,13 @@ REXCVAR_DEFINE_BOOL(present_upscaler_shadow_motion, true, "GPU",
                     "Give a temporal upscaler the history of the road the other way, or none, "
                     "where the car's ground shadow's edges moved over the ground (FM4): with the "
                     "ground's motion there, DLSS drew thin light lines across the shadow in reverse "
-                    "look and preset M black blocks");
+                    "look and preset M black blocks. Off under DLSS preset K, which trails there");
 
 REXCVAR_DEFINE_BOOL(present_upscaler_uncovered_ground, true, "GPU",
                     "Give a temporal upscaler the history of the road the other way, or none, "
                     "where the ground was under a car a frame ago (FM4): DLSS took the car's lower "
                     "body or a tyre as its history, preset M a smudge or dark blocks behind the "
-                    "car at speed");
+                    "car at speed. Off under DLSS preset K, which trails there");
 
 REXCVAR_DEFINE_BOOL(present_upscaler_decal_motion, true, "GPU",
                     "Give a temporal upscaler other cars' ground shadows' motion as their "
@@ -4259,6 +4259,7 @@ void VulkanCommandProcessor::IssueSwapImpl(uint32_t frontbuffer_ptr, uint32_t fr
   const bool hudless_wanted = presenter->WantsHudlessGuestOutput();
   // UP-1.3: and the depth and camera motion.
   const bool camera_wanted = presenter->WantsGuestOutputCamera();
+  const bool plain_ground_motion = presenter->GuestOutputPlainGroundMotion();
   VkImageView camera_depth_view = VK_NULL_HANDLE;
   Fh1NativeExecutor::Camera camera = {};
   const bool scene_fxaa =
@@ -4286,7 +4287,8 @@ void VulkanCommandProcessor::IssueSwapImpl(uint32_t frontbuffer_ptr, uint32_t fr
     fh1_native_executor_->SetReactiveShadowsEnabled(
         REXCVAR_GET(present_upscaler_reactive_shadows));
     fh1_native_executor_->SetSpinFreeWheels(REXCVAR_GET(present_upscaler_spin_free_wheels));
-    fh1_native_executor_->SetShadowMotion(REXCVAR_GET(present_upscaler_shadow_motion));
+    fh1_native_executor_->SetShadowMotion(REXCVAR_GET(present_upscaler_shadow_motion) &&
+                                          !plain_ground_motion);
     fh1_native_executor_->SetDecalMotion(REXCVAR_GET(present_upscaler_decal_motion));
     fh1_native_executor_->SetMirrorComposite(hudless_wanted &&
                                              REXCVAR_GET(present_upscaler_mirrors));
@@ -4303,7 +4305,7 @@ void VulkanCommandProcessor::IssueSwapImpl(uint32_t frontbuffer_ptr, uint32_t fr
       [this, guest_output_width, guest_output_height, display_width, display_height,
        frontbuffer_format, swap_texture_view, swap_post_effect, swap_source_needs_rb_swap,
        hud_snapshot_view, hdr_active, scene_fxaa, scene_lut, hudless_wanted, camera_depth_view,
-       camera](ui::Presenter::GuestOutputRefreshContext& context) -> bool {
+       camera, plain_ground_motion](ui::Presenter::GuestOutputRefreshContext& context) -> bool {
         // In case the swap command is the only one in the frame.
         if (!BeginSubmission(true)) {
           return false;
@@ -4967,7 +4969,8 @@ void VulkanCommandProcessor::IssueSwapImpl(uint32_t frontbuffer_ptr, uint32_t fr
                                        : 0u) |
                 uint32_t(object_slots_readable && REXCVAR_GET(present_upscaler_decal_motion)) << 28 |
                 uint32_t(object_debug == 3) << 29 |
-                uint32_t(REXCVAR_GET(present_upscaler_uncovered_ground)) << 30;
+                uint32_t(REXCVAR_GET(present_upscaler_uncovered_ground) && !plain_ground_motion)
+                    << 30;
             if ((frame_current_ % 600) == 0) {
               REXGPU_INFO(
                   "Object motion: {} slots, {} slot draws, {} without the variant, {} reactive "

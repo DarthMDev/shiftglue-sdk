@@ -55,6 +55,9 @@ class VulkanUpscaler {
   virtual bool Dispatch(VkCommandBuffer command_buffer, const VulkanUpscalerInputs& inputs) = 0;
   // Frees the resources Prepare made (the GPU must be done with them).
   virtual void Release() = 0;
+  // Whether the provider, as last prepared, wants FM4's ground to keep its own motion around
+  // the cars instead of borrowed or no history where a car or its shadow moved over it.
+  virtual bool WantsPlainGroundMotion() const { return false; }
 };
 
 // The temporal providers built into this build, available or not.

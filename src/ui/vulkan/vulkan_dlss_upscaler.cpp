@@ -290,6 +290,12 @@ class VulkanDlssUpscaler final : public VulkanUpscaler {
     return true;
   }
 
+  // Preset K draws trails along the edges of those areas (light ones with motion blur off, a
+  // dark outline of the car's lower body and mirrors with it on), where M and FSR settle them.
+  bool WantsPlainGroundMotion() const override {
+    return preset_ == NVSDK_NGX_DLSS_Hint_Render_Preset_K;
+  }
+
   bool Dispatch(VkCommandBuffer command_buffer, const VulkanUpscalerInputs& inputs) override {
     if (!info_.available || !inputs.color.image || !inputs.output.image ||
         !inputs.depth.image || !inputs.motion_vectors.image) {

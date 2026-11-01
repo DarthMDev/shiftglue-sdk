@@ -2670,6 +2670,9 @@ Presenter::PaintResult VulkanPresenter::PaintAndPresentImpl(bool execute_ui_draw
           jitter_phases = std::max(1u, uint32_t(std::ceil(8.0f * ratio * ratio)));
         }
         guest_output_jitter_phases_.store(jitter_phases, std::memory_order_relaxed);
+        guest_output_plain_ground_motion_.store(
+            temporal_reads_guest_output && temporal_upscaler->WantsPlainGroundMotion(),
+            std::memory_order_relaxed);
         SetTemporalUpscalerActive(temporal_reads_guest_output);
         SetTemporalUpscalerMipBias(
             temporal_input_width
