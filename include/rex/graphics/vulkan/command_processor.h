@@ -146,6 +146,7 @@ class VulkanCommandProcessor : public CommandProcessor {
   void ClearCaches() override;
   void OnReduceMemory() override;
   void InvalidateGpuMemory() override;
+  void LogHostGpuLoss() override { LogCheckpoints(); }
   void InitializeShaderStorage(const std::filesystem::path& cache_root, uint32_t title_id,
                                bool blocking) override;
 

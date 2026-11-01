@@ -426,6 +426,11 @@ void GraphicsSystem::OnHostGpuLossFromAnyThread([[maybe_unused]] bool is_respons
   if (host_gpu_loss_reported_.test_and_set(std::memory_order_relaxed)) {
     return;
   }
+  // The presenter may see the loss first (a hang in its own paint, such as DLSS), and the
+  // report would otherwise end the process before the command processor's.
+  if (command_processor_) {
+    command_processor_->LogHostGpuLoss();
+  }
   system::ReportHostGpuLoss();
 }
 

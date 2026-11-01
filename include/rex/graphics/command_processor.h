@@ -136,6 +136,9 @@ class CommandProcessor {
 
   virtual void ClearCaches();
   virtual void InvalidateGpuMemory();
+  // From any thread that saw the host GPU lost, before the process ends: the backend's own
+  // report of what the GPU was doing.
+  virtual void LogHostGpuLoss() {}
 
   // "Desired" is for the external thread managing the post-processing effect.
   SwapPostEffect GetDesiredSwapPostEffect() const { return swap_post_effect_desired_; }
