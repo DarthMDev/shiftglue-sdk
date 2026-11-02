@@ -77,6 +77,13 @@ float GetTemporalUpscalerMipBias();
 bool TemporalUpscalerCutOutWithoutMipBias(bool alpha_to_mask, bool option, float bias);
 void SetTemporalUpscalerMipBias(float bias);
 
+// Whether a FidelityFX context made for an output of this largest size serves this output. FSR 2
+// takes its output size from the context and ignores the dispatch's: on a smaller output it would
+// write the scene at the old size, leaving only its top left corner in the image. fm4 fork: upstream
+// still reuses a larger context for every version here; keep this on a merge.
+bool FfxContextServesOutput(uint32_t fsr_major, uint32_t context_width, uint32_t context_height,
+                            uint32_t output_width, uint32_t output_height);
+
 // Per-frame description of a temporal upscale, for every graphics API.
 // The game camera of a frame, for a temporal upscaler's depth and motion.
 struct UpscalerCamera {

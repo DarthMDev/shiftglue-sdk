@@ -276,8 +276,10 @@ class VulkanFfxUpscaler final : public VulkanUpscaler {
       return false;
     }
     if (context_ && max_render_width <= max_render_width_ &&
-        max_render_height <= max_render_height_ && max_output_width <= max_output_width_ &&
-        max_output_height <= max_output_height_ && hdr == hdr_) {
+        max_render_height <= max_render_height_ &&
+        FfxContextServesOutput(major_, max_output_width_, max_output_height_, max_output_width,
+                               max_output_height) &&
+        hdr == hdr_) {
       return true;
     }
     // A context that failed is not retried every frame for the same sizes.

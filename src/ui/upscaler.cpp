@@ -64,6 +64,14 @@ float GetTemporalUpscalerMipBias() {
   return temporal_upscaler_mip_bias.load(std::memory_order_relaxed);
 }
 
+bool FfxContextServesOutput(uint32_t fsr_major, uint32_t context_width, uint32_t context_height,
+                            uint32_t output_width, uint32_t output_height) {
+  if (fsr_major == 2) {
+    return output_width == context_width && output_height == context_height;
+  }
+  return output_width <= context_width && output_height <= context_height;
+}
+
 bool TemporalUpscalerCutOutWithoutMipBias(bool alpha_to_mask, bool option, float bias) {
   return alpha_to_mask && option && bias != 0.0f;
 }

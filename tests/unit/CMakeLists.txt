@@ -60,6 +60,7 @@ add_executable(unit_tests
     ui/fm4_dlss_preset_test.cpp
     ui/upscaler_mip_bias_test.cpp
     ui/window_aspect_ratio_test.cpp
+    ui/ffx_context_test.cpp
 )
 
 target_sources(unit_tests PRIVATE
