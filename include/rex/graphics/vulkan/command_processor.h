@@ -164,6 +164,8 @@ class VulkanCommandProcessor : public CommandProcessor {
 
   // The LOD bias the texture cache's samplers are created with.
   double sampler_mip_lod_bias() const { return sampler_mip_lod_bias_; }
+  // The player's texture_mip_lod_bias, without a temporal upscaler's.
+  static double PlayerMipLodBias();
 
   bool CompileGlslToSpirv(VkShaderStageFlagBits stage, std::string_view source,
                           std::vector<uint32_t>& spirv_out, std::string& error_out) const;
@@ -1137,6 +1139,7 @@ class VulkanCommandProcessor : public CommandProcessor {
   uint32_t declined_draw_resolution_scale_ = 0;
   // ConfiguredMipLodBias() when the texture cache's samplers were last dropped.
   double sampler_mip_lod_bias_ = 0.0;
+  double sampler_player_mip_lod_bias_ = 0.0;
   int32_t sampler_anisotropic_override_ = 0;
 
   VkDescriptorPool shared_memory_and_edram_descriptor_pool_ = VK_NULL_HANDLE;
@@ -1433,6 +1436,7 @@ class VulkanCommandProcessor : public CommandProcessor {
     uint32_t binding = UINT32_MAX;
     int32_t anisotropic_override = 0;
     bool force_trilinear = false;
+    bool no_upscaler_lod_bias = false;
     VulkanTextureCache::SamplerParameters parameters;
     VkSampler sampler = VK_NULL_HANDLE;
     uint64_t submission = 0;
@@ -1449,6 +1453,7 @@ class VulkanCommandProcessor : public CommandProcessor {
     uint32_t binding = UINT32_MAX;
     int32_t anisotropic_override = 0;
     bool force_trilinear = false;
+    bool no_upscaler_lod_bias = false;
     VulkanTextureCache::SamplerParameters parameters;
   };
   static constexpr size_t kSamplerParametersMemoCount = 1024;
@@ -1475,6 +1480,7 @@ class VulkanCommandProcessor : public CommandProcessor {
     uint32_t fetch_mask = 0;
     int32_t anisotropic_override = 0;
     bool force_trilinear = false;
+    bool no_upscaler_lod_bias = false;
     bool fetch_key = false;
     bool scene_filtering = false;
     bool valid = false;

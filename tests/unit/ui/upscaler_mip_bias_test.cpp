@@ -13,6 +13,7 @@
 #include <rex/ui/upscaler.h>
 
 using Catch::Approx;
+using rex::ui::TemporalUpscalerCutOutWithoutMipBias;
 using rex::ui::TemporalUpscalerMipBias;
 
 TEST_CASE("The mip bias picks the output size's mips", "[mip_bias]") {
@@ -29,4 +30,11 @@ TEST_CASE("The mip bias offset adds to it, even without an upscale", "[mip_bias]
 
 TEST_CASE("A render larger than the output keeps the mips the game asks for", "[mip_bias]") {
   CHECK(TemporalUpscalerMipBias(5120, 2560, 0.0f) == Approx(0.0f));
+}
+
+TEST_CASE("Alpha to coverage cut-outs sample without an upscaler's bias", "[mip_bias]") {
+  CHECK(TemporalUpscalerCutOutWithoutMipBias(true, true, -1.0f));
+  CHECK_FALSE(TemporalUpscalerCutOutWithoutMipBias(false, true, -1.0f));
+  CHECK_FALSE(TemporalUpscalerCutOutWithoutMipBias(true, false, -1.0f));
+  CHECK_FALSE(TemporalUpscalerCutOutWithoutMipBias(true, true, 0.0f));
 }

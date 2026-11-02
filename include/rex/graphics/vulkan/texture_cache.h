@@ -46,6 +46,8 @@ class VulkanTextureCache final : public TextureCache {
       uint32_t mip_base_map : 1;            // 22
       // Outside the scene (kNoSceneFiltering): no player LOD bias.
       uint32_t no_lod_bias : 1;             // 23
+      // Alpha to coverage under a temporal upscaler: no upscaler LOD bias.
+      uint32_t no_upscaler_lod_bias : 1;    // 24
       // Maximum mip level is in the texture resource itself, but mip_base_map
       // can be used to limit fetching to mip_min_level.
     };
@@ -140,7 +142,8 @@ class VulkanTextureCache final : public TextureCache {
   // for draws outside the scene: the title's own anisotropy, no LOD bias.
   static constexpr int32_t kNoSceneFiltering = INT32_MIN;
   SamplerParameters GetSamplerParameters(const VulkanShader::SamplerBinding& binding,
-                                         int32_t anisotropic_override) const;
+                                         int32_t anisotropic_override,
+                                         bool no_upscaler_lod_bias) const;
 
   // Must be called for every used sampler at least once in a single submission,
   // and a submission must be open for this to be callable.

@@ -83,6 +83,11 @@ REXCVAR_DECLARE(bool, gpu_async_fence_probe);
 REXCVAR_DECLARE(bool, gpu_async_fence_completion);
 #endif
 REXCVAR_DECLARE(int32_t, gpu_trace_bins_vblank);
+REXCVAR_DEFINE_BOOL(present_upscaler_cut_out_no_bias, true, "GPU",
+                    "Leave the temporal upscaler's texture LOD bias off alpha to coverage draws "
+                    "(foliage, crowds, fences): with it, their cut-outs change shape in motion "
+                    "and pop");
+
 // On macOS an in-run A/B on an M4 Pro drive gives about 0.8 ms a frame.
 REXCVAR_DEFINE_BOOL(present_upscaler_object_motion, true, "GPU",
                     "Give a temporal upscaler the motion of each moving object (UP-1.7), "
@@ -2628,6 +2633,7 @@ bool VulkanCommandProcessor::CreateScaledComponents(uint32_t draw_resolution_sca
   }
   // A new texture cache has no samplers yet.
   sampler_mip_lod_bias_ = ConfiguredMipLodBias();
+  sampler_player_mip_lod_bias_ = PlayerMipLodBias();
   sampler_anisotropic_override_ = REXCVAR_GET(anisotropic_override);
 
   if (REXCVAR_GET(vulkan_fh1_native_executor) && REXCVAR_GET(vulkan_dynamic_rendering) &&
@@ -2877,6 +2883,8 @@ void VulkanCommandProcessor::SwitchDrawResolutionScaleIfRequested() {
                   .count());
 }
 
+double VulkanCommandProcessor::PlayerMipLodBias() { return REXCVAR_GET(texture_mip_lod_bias); }
+
 double VulkanCommandProcessor::ConfiguredMipLodBias() {
   return REXCVAR_GET(texture_mip_lod_bias) + ui::GetTemporalUpscalerMipBias();
 }
@@ -2884,7 +2892,10 @@ double VulkanCommandProcessor::ConfiguredMipLodBias() {
 void VulkanCommandProcessor::RecreateSamplersIfSettingsChanged() {
   const double mip_lod_bias = ConfiguredMipLodBias();
   const int32_t anisotropic_override = REXCVAR_GET(anisotropic_override);
+  // The player's alone too: cut-outs' samplers take it without the upscaler's.
+  const double player_mip_lod_bias = PlayerMipLodBias();
   if ((mip_lod_bias == sampler_mip_lod_bias_ &&
+       player_mip_lod_bias == sampler_player_mip_lod_bias_ &&
        anisotropic_override == sampler_anisotropic_override_) ||
       device_lost_ || frame_open_) {
     return;
@@ -2905,6 +2916,7 @@ void VulkanCommandProcessor::RecreateSamplersIfSettingsChanged() {
                   std::chrono::steady_clock::now() - start)
                   .count());
   sampler_mip_lod_bias_ = mip_lod_bias;
+  sampler_player_mip_lod_bias_ = player_mip_lod_bias;
   sampler_anisotropic_override_ = anisotropic_override;
 }
 
@@ -6766,6 +6778,13 @@ bool VulkanCommandProcessor::IssueDrawImpl(xenos::PrimitiveType prim_type, uint3
     const int32_t anisotropic_override = scene_filtering ? REXCVAR_GET(anisotropic_override)
                                                          : VulkanTextureCache::kNoSceneFiltering;
     const bool force_trilinear = REXCVAR_GET(force_trilinear_filtering);
+    // A leaf's alpha cut from a finer mip than the render resolves changes shape from frame to
+    // frame under an upscaler's jitter and motion: whole clusters of leaves pop.
+    const bool no_upscaler_lod_bias =
+        scene_filtering &&
+        ui::TemporalUpscalerCutOutWithoutMipBias(
+            regs.Get<reg::RB_COLORCONTROL>().alpha_to_mask_enable,
+            REXCVAR_GET(present_upscaler_cut_out_no_bias), ui::GetTemporalUpscalerMipBias());
     const bool fetch_key = REXCVAR_GET(gpu_sampler_fetch_key);
     const bool fetch_key_verify = fetch_key && REXCVAR_GET(gpu_sampler_fetch_key_verify);
     if (!i) {
@@ -6773,7 +6792,8 @@ bool VulkanCommandProcessor::IssueDrawImpl(xenos::PrimitiveType prim_type, uint3
       if (unchanged_inputs && inputs.valid && inputs.vertex_shader == vertex_shader &&
           inputs.pixel_shader == pixel_shader && inputs.submission == GetCurrentSubmission() &&
           inputs.anisotropic_override == anisotropic_override &&
-          inputs.force_trilinear == force_trilinear && inputs.fetch_key == fetch_key &&
+          inputs.force_trilinear == force_trilinear &&
+          inputs.no_upscaler_lod_bias == no_upscaler_lod_bias && inputs.fetch_key == fetch_key &&
           inputs.scene_filtering == scene_filtering && !fetch_key_verify &&
           !(inputs.fetch_mask & ~texture_cache_->texture_bindings_in_sync())) {
         // current_samplers_* still hold this draw's samplers.
@@ -6841,12 +6861,14 @@ bool VulkanCommandProcessor::IssueDrawImpl(xenos::PrimitiveType prim_type, uint3
           if (cached.binding != binding ||
               std::memcmp(cached.fetch.data(), fetch, sizeof(cached.fetch)) ||
               cached.anisotropic_override != anisotropic_override ||
-              cached.force_trilinear != force_trilinear) {
+              cached.force_trilinear != force_trilinear ||
+              cached.no_upscaler_lod_bias != no_upscaler_lod_bias) {
             const uint32_t previous_parameters = cached.parameters.value;
             std::memcpy(cached.fetch.data(), fetch, sizeof(cached.fetch));
             cached.binding = binding;
             cached.anisotropic_override = anisotropic_override;
             cached.force_trilinear = force_trilinear;
+            cached.no_upscaler_lod_bias = no_upscaler_lod_bias;
             uint64_t memo_hash = uint64_t(binding) * UINT64_C(0x9E3779B97F4A7C15);
             for (uint32_t word = 0; word < 6; ++word) {
               memo_hash = (memo_hash ^ fetch[word]) * UINT64_C(0xBF58476D1CE4E5B9);
@@ -6856,20 +6878,22 @@ bool VulkanCommandProcessor::IssueDrawImpl(xenos::PrimitiveType prim_type, uint3
                                           (kSamplerParametersMemoCount - 1)];
             if (memo.binding == binding && !std::memcmp(memo.fetch.data(), fetch, sizeof(memo.fetch)) &&
                 memo.anisotropic_override == anisotropic_override &&
-                memo.force_trilinear == force_trilinear) {
+                memo.force_trilinear == force_trilinear &&
+                memo.no_upscaler_lod_bias == no_upscaler_lod_bias) {
               cached.parameters = memo.parameters;
               if (draw_cost_.enabled) ++sampler_census_.memo_hits;
               if (fetch_key_verify &&
-                  texture_cache_->GetSamplerParameters(shader_sampler_binding, anisotropic_override).value !=
+                  texture_cache_->GetSamplerParameters(shader_sampler_binding, anisotropic_override, no_upscaler_lod_bias).value !=
                       cached.parameters.value) {
                 ++sampler_census_.verified_different;
               }
             } else {
-              cached.parameters = texture_cache_->GetSamplerParameters(shader_sampler_binding, anisotropic_override);
+              cached.parameters = texture_cache_->GetSamplerParameters(shader_sampler_binding, anisotropic_override, no_upscaler_lod_bias);
               memo.fetch = cached.fetch;
               memo.binding = binding;
               memo.anisotropic_override = anisotropic_override;
               memo.force_trilinear = force_trilinear;
+              memo.no_upscaler_lod_bias = no_upscaler_lod_bias;
               memo.parameters = cached.parameters;
             }
             // The VkSampler depends only on the parameters: a slot whose new
@@ -6880,7 +6904,7 @@ bool VulkanCommandProcessor::IssueDrawImpl(xenos::PrimitiveType prim_type, uint3
           } else {
             if (draw_cost_.enabled) ++sampler_census_.slot_hits;
             if (fetch_key_verify &&
-                texture_cache_->GetSamplerParameters(shader_sampler_binding, anisotropic_override).value !=
+                texture_cache_->GetSamplerParameters(shader_sampler_binding, anisotropic_override, no_upscaler_lod_bias).value !=
                     cached.parameters.value) {
               ++sampler_census_.verified_different;
             }
@@ -6947,6 +6971,7 @@ bool VulkanCommandProcessor::IssueDrawImpl(xenos::PrimitiveType prim_type, uint3
         inputs.fetch_mask = sampler_fetch_mask;
         inputs.anisotropic_override = anisotropic_override;
         inputs.force_trilinear = force_trilinear;
+        inputs.no_upscaler_lod_bias = no_upscaler_lod_bias;
         inputs.fetch_key = fetch_key;
         inputs.scene_filtering = scene_filtering;
         inputs.valid = true;

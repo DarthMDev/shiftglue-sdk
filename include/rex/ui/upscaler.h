@@ -72,6 +72,9 @@ void SetTemporalUpscalerActive(bool active);
 float TemporalUpscalerMipBias(uint32_t render_width, uint32_t output_width, float offset);
 // The bias of the presenter's last paint, 0 without a temporal upscale. Any thread.
 float GetTemporalUpscalerMipBias();
+// Whether a draw samples without that bias: alpha to coverage cut-outs from finer mips change
+// shape in motion and pop. Without a bias there is nothing to leave out, and no second sampler.
+bool TemporalUpscalerCutOutWithoutMipBias(bool alpha_to_mask, bool option, float bias);
 void SetTemporalUpscalerMipBias(float bias);
 
 // Per-frame description of a temporal upscale, for every graphics API.

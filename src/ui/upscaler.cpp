@@ -64,6 +64,10 @@ float GetTemporalUpscalerMipBias() {
   return temporal_upscaler_mip_bias.load(std::memory_order_relaxed);
 }
 
+bool TemporalUpscalerCutOutWithoutMipBias(bool alpha_to_mask, bool option, float bias) {
+  return alpha_to_mask && option && bias != 0.0f;
+}
+
 void SetTemporalUpscalerMipBias(float bias) {
   temporal_upscaler_mip_bias.store(bias, std::memory_order_relaxed);
 }
