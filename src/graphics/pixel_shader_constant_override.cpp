@@ -18,14 +18,25 @@ namespace {
 
 template <typename T>
 bool ParseWhole(std::string_view text, T& value, int base = 10) {
-  const char* end = text.data() + text.size();
-  std::from_chars_result result;
-  if constexpr (std::is_floating_point_v<T>) {
-    result = std::from_chars(text.data(), end, value);
-  } else {
-    result = std::from_chars(text.data(), end, value, base);
+  if (text.empty()) {
+    return false;
   }
-  return !text.empty() && result.ec == std::errc() && result.ptr == end;
+  if constexpr (std::is_floating_point_v<T>) {
+#if defined(__APPLE__)
+    char* parse_end = nullptr;
+    std::string s(text);
+    value = std::strtof(s.c_str(), &parse_end);
+    return parse_end == s.c_str() + s.size();
+#else
+    const char* end = text.data() + text.size();
+    std::from_chars_result result = std::from_chars(text.data(), end, value);
+    return result.ec == std::errc() && result.ptr == end;
+#endif
+  } else {
+    const char* end = text.data() + text.size();
+    std::from_chars_result result = std::from_chars(text.data(), end, value, base);
+    return result.ec == std::errc() && result.ptr == end;
+  }
 }
 
 std::optional<PixelShaderConstantOverride> ParseEntry(std::string_view entry) {
