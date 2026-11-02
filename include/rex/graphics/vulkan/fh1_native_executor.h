@@ -692,8 +692,6 @@ class Fh1NativeExecutor {
   VkPipelineLayout camera_depth_pipeline_layout_ = VK_NULL_HANDLE;
   // Single-sampled and multisampled sources.
   std::array<VkPipeline, 2> camera_depth_pipelines_ = {};
-  VkDescriptorPool camera_depth_descriptor_pool_ = VK_NULL_HANDLE;
-  std::array<VkDescriptorSet, 4> camera_depth_sets_ = {};
 
   // Descriptor set layouts (set 0): source images (bindings 16 and 17) with
   // the storage buffer (binding 32) for compute, the source images for

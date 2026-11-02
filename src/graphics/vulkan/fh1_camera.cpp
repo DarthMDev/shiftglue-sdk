@@ -709,28 +709,6 @@ bool Fh1NativeExecutor::EnsureCameraDepthPipelines() {
                                  &camera_depth_pipeline_layout_) != VK_SUCCESS) {
     return false;
   }
-  const uint32_t set_count = uint32_t(camera_depth_sets_.size());
-  VkDescriptorPoolSize pool_sizes[2] = {{VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, set_count},
-                                        {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, set_count}};
-  VkDescriptorPoolCreateInfo pool_info = {};
-  pool_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-  pool_info.maxSets = set_count;
-  pool_info.poolSizeCount = 2;
-  pool_info.pPoolSizes = pool_sizes;
-  if (dfn.vkCreateDescriptorPool(device, &pool_info, nullptr, &camera_depth_descriptor_pool_) !=
-      VK_SUCCESS) {
-    return false;
-  }
-  std::array<VkDescriptorSetLayout, 4> layouts;
-  layouts.fill(camera_depth_set_layout_);
-  VkDescriptorSetAllocateInfo set_info = {};
-  set_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
-  set_info.descriptorPool = camera_depth_descriptor_pool_;
-  set_info.descriptorSetCount = set_count;
-  set_info.pSetLayouts = layouts.data();
-  if (dfn.vkAllocateDescriptorSets(device, &set_info, camera_depth_sets_.data()) != VK_SUCCESS) {
-    return false;
-  }
   for (uint32_t multisampled = 0; multisampled < 2; ++multisampled) {
     std::string source = kCameraDepthSource;
     source.insert(source.find('\n') + 1,
@@ -826,7 +804,13 @@ void Fh1NativeExecutor::SnapshotCameraDepth(uint32_t band_row) {
   Transition(camera_depth_, VK_IMAGE_LAYOUT_GENERAL, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
              VK_ACCESS_SHADER_WRITE_BIT);
   command_processor_.SubmitBarriers(true);
-  const VkDescriptorSet set = camera_depth_sets_[frame_ % camera_depth_sets_.size()];
+  // A set per snapshot, not per frame: a frame has one per tile, and the submission worker may
+  // already be binding the previous tile's when this one is written.
+  const VkDescriptorSet set = AllocateDescriptorSet(camera_depth_set_layout_);
+  if (set == VK_NULL_HANDLE) {
+    Skip("camera_depth_descriptor");
+    return;
+  }
   VkDescriptorImageInfo images[2] = {
       {VK_NULL_HANDLE, surface->sampled_view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
       {VK_NULL_HANDLE, camera_depth_.view, VK_IMAGE_LAYOUT_GENERAL},
@@ -900,8 +884,6 @@ void Fh1NativeExecutor::DestroyCamera() {
   }
   ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroyPipelineLayout, device,
                                          camera_depth_pipeline_layout_);
-  ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroyDescriptorPool, device,
-                                         camera_depth_descriptor_pool_);
   ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroyDescriptorSetLayout, device,
                                          camera_depth_set_layout_);
 }
