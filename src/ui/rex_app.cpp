@@ -427,12 +427,17 @@ bool ReXApp::SetupPresentation() {
   if (REXCVAR_GET(fullscreen)) {
     window_->SetFullscreen(true);
   }
+  // fm4 fork, upstream may bring its own windowed handling: keep this deferred on a merge. The cvar
+  // can be set from any thread, and SetFullscreen belongs to the UI thread's.
   rex::cvar::RegisterChangeCallback("fullscreen", [this](std::string_view, std::string_view value) {
-    if (window_) {
-      window_->SetFullscreen(rex::string::from_string<bool>(value, false));
-    }
+    const bool fullscreen = rex::string::from_string<bool>(value, false);
+    app_context().CallInUIThreadDeferred([this, fullscreen] {
+      if (window_) {
+        window_->SetFullscreen(fullscreen);
+      }
+    });
   });
-  for (const char* name : {"window_width", "window_height", "monitor"}) {
+  for (const char* name : {"window_aspect_ratio", "window_width", "window_height", "monitor"}) {
     rex::cvar::RegisterChangeCallback(name, [this](std::string_view, std::string_view) {
       // Deferred: the callback runs under the cvar registry lock, and a size
       // change arrives as two writes.

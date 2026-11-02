@@ -6,6 +6,7 @@ add_executable(unit_tests
     audio/xma_packet_test.cpp
     memory/heap_allocation_test.cpp
     kernel/object_table_test.cpp
+    kernel/video_mode_test.cpp
     core/cvar_test.cpp
     core/fiber_test.cpp
     core/filesystem_test.cpp
@@ -58,6 +59,7 @@ add_executable(unit_tests
     ui/presentation_pacer_test.cpp
     ui/fm4_dlss_preset_test.cpp
     ui/upscaler_mip_bias_test.cpp
+    ui/window_aspect_ratio_test.cpp
 )
 
 target_sources(unit_tests PRIVATE

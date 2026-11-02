@@ -29,6 +29,9 @@
 namespace rex {
 namespace ui {
 
+// A width:height shape as width / height; 0 for anything else, which leaves a window free.
+float ParseAspectRatio(std::string_view value);
+
 class Window {
  public:
   // Transitions between these phases is sequential and looped (and >= and <=
@@ -297,7 +300,7 @@ class Window {
   /// Valid after Open() returns successfully.
   virtual void* GetNativeWindowHandle() const { return nullptr; }
 
-  /// Applies the window_width, window_height and monitor cvars to the open
+  /// Applies the window_aspect_ratio, window_width, window_height and monitor cvars to the open
   /// window: its windowed size, centered on the configured display (a
   /// fullscreen window moves to cover that display). From the UI thread.
   virtual void ApplyConfiguredSizeAndMonitor() {}

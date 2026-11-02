@@ -83,6 +83,11 @@ uint32_t ResolveWindowHeight(uint32_t requested_height) {
   return requested_height;
 }
 
+void ApplyConfiguredAspectRatio(SDL_Window* window) {
+  const float aspect = ParseAspectRatio(REXCVAR_GET(window_aspect_ratio));
+  SDL_SetWindowAspectRatio(window, aspect, aspect);
+}
+
 // SDL timer callback (runs on SDL's timer thread): defer the actual hide to
 // the UI thread. The deferred function only touches the global SDL cursor and
 // the window's nonvirtual cursor-visibility getter; the window owns the timer
@@ -156,6 +161,8 @@ bool WindowSDL::OpenImpl() {
   }
   sdl_window_id_ = SDL_GetWindowID(sdl_window_);
   sdl_app_context().RegisterWindow(sdl_window_id_, this);
+
+  ApplyConfiguredAspectRatio(sdl_window_);
 
   // Center on the requested display before fullscreen so SDL resolves
   // fullscreen against it.
@@ -332,6 +339,7 @@ void WindowSDL::ApplyConfiguredSizeAndMonitor() {
   if (!sdl_window_) {
     return;
   }
+  ApplyConfiguredAspectRatio(sdl_window_);
   // A fullscreen window keeps this as its windowed size.
 #if REX_PLATFORM_MAC
   SDL_SetWindowSize(sdl_window_, int(ResolveWindowWidth(default_logical_width_)),

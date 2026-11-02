@@ -10,6 +10,7 @@
  */
 
 #include <algorithm>
+#include <charconv>
 #include <iterator>
 
 #include <rex/assert.h>
@@ -28,6 +29,12 @@ REXCVAR_DEFINE_INT32(window_width, 0, "UI/Window",
 REXCVAR_DEFINE_INT32(window_height, 0, "UI/Window",
                      "Window height in logical pixels (0 = use app default)")
     .range(0, 8192);
+
+// fm4 fork, upstream may bring its own windowed handling: on a merge keep the shape a setting, as
+// the apps' supported aspect ratios differ and FM4's will grow.
+REXCVAR_DEFINE_STRING(window_aspect_ratio, "", "UI/Window",
+                      "The shape the window keeps while resized, as width:height (16:9); "
+                      "anything else leaves it free");
 
 // kHotReload (default): Window::SetFullscreen can be applied live, so the
 // change callback registered in ReXApp::SetupPresentation keeps the window
@@ -65,6 +72,21 @@ REXCVAR_DEFINE_DOUBLE(video_mode_refresh_rate, 60.0, "Display",
 
 namespace rex {
 namespace ui {
+
+float ParseAspectRatio(std::string_view value) {
+  const auto positive = [](std::string_view text, int& number) {
+    const char* const end = text.data() + text.size();
+    const auto [parsed, error] = std::from_chars(text.data(), end, number);
+    return error == std::errc{} && parsed == end && number > 0;
+  };
+  const size_t colon = value.find(':');
+  int width = 0;
+  int height = 0;
+  return colon != std::string_view::npos && positive(value.substr(0, colon), width) &&
+                 positive(value.substr(colon + 1), height)
+             ? float(width) / float(height)
+             : 0.0f;
+}
 
 Window::Window(WindowedAppContext& app_context, const std::string_view title,
                uint32_t desired_logical_width, uint32_t desired_logical_height)
