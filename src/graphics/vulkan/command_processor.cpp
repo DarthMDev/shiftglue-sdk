@@ -7477,10 +7477,10 @@ bool VulkanCommandProcessor::IssueDrawImpl(xenos::PrimitiveType prim_type, uint3
           return false;
       }
       VertexBufferState& state = vertex_buffer_states_[vfetch_index];
-      if (state.address == vfetch_constant.address && state.size == vfetch_constant.size) {
-        vertex_buffers_in_sync_[vfetch_index >> 6] |= vfetch_bit;
-        continue;
-      }
+      // An unchanged binding does not imply unchanged guest memory. CPU writes
+      // invalidate SharedMemory pages without changing the fetch constant, and
+      // the address/size cache survives swaps. Let RequestRange check page
+      // validity again after the per-frame binding bit has been cleared.
       SharedMemory::UploadKindScope upload_kind(*shared_memory_, SharedMemory::UploadKind::kVertex);
       if (!shared_memory_->RequestRange(vfetch_constant.address << 2, vfetch_constant.size << 2)) {
         REXGPU_ERROR(
