@@ -2345,6 +2345,7 @@ Presenter::PaintResult VulkanPresenter::PaintAndPresentImpl(bool execute_ui_draw
       REXLOG_ERROR(
           "VulkanPresenter: Failed to acquire the swapchain image as the "
           "device has been lost");
+      vulkan_device_->NoteDeviceLost();
       return PaintResult::kGpuLostResponsible;
     case VK_ERROR_OUT_OF_DATE_KHR:
     case VK_ERROR_SURFACE_LOST_KHR:
@@ -3368,6 +3369,7 @@ Presenter::PaintResult VulkanPresenter::PaintAndPresentImpl(bool execute_ui_draw
             .last_usage_submission_index = 0;
       }
       if (submit_result == VK_ERROR_DEVICE_LOST) {
+        vulkan_device_->NoteDeviceLost();
         return PaintResult::kGpuLostResponsible;
       }
       // The image is in an acquired state - but now, it will be in it forever.
@@ -3428,6 +3430,7 @@ Presenter::PaintResult VulkanPresenter::PaintAndPresentImpl(bool execute_ui_draw
       REXLOG_ERROR(
           "VulkanPresenter: Failed to present the swapchain image as the "
           "device has been lost");
+      vulkan_device_->NoteDeviceLost();
       return PaintResult::kGpuLostResponsible;
     case VK_ERROR_OUT_OF_DATE_KHR:
     case VK_ERROR_SURFACE_LOST_KHR:

@@ -10,7 +10,13 @@
  * @modified    Tom Clay, 2026 - Adapted for ReXGlue runtime
  */
 
+#include <chrono>
+#include <cstdint>
+#include <deque>
 #include <memory>
+#include <mutex>
+#include <string>
+#include <unordered_map>
 #include <vector>
 
 #include <rex/platform.h>
@@ -118,6 +124,16 @@ class VulkanInstance {
 
   void EnumeratePhysicalDevices(std::vector<VkPhysicalDevice>& physical_devices_out) const;
 
+  // With vulkan_device_address_bindings, GPU address ranges of objects as the
+  // driver binds and unbinds them (VK_EXT_device_address_binding_report), to
+  // name what a faulting address belonged to after a device loss.
+  bool tracks_device_address_bindings() const {
+    return address_binding_messenger_ != VK_NULL_HANDLE;
+  }
+  // One line per object bound over [address, address + size), then per object
+  // unbound from it, the most recent first.
+  std::vector<std::string> DescribeDeviceAddress(uint64_t address, uint64_t size) const;
+
  private:
   explicit VulkanInstance() = default;
 
@@ -139,6 +155,28 @@ class VulkanInstance {
       const VkDebugUtilsMessengerCallbackDataEXT* callback_data, void* user_data);
 
   VkDebugUtilsMessengerEXT debug_utils_messenger_ = VK_NULL_HANDLE;
+
+  static VkBool32 AddressBindingMessengerCallback(
+      VkDebugUtilsMessageSeverityFlagBitsEXT message_severity,
+      VkDebugUtilsMessageTypeFlagsEXT message_types,
+      const VkDebugUtilsMessengerCallbackDataEXT* callback_data, void* user_data);
+
+  struct AddressBinding {
+    uint64_t base = 0;
+    uint64_t size = 0;
+    VkObjectType object_type = VK_OBJECT_TYPE_UNKNOWN;
+    uint64_t object_handle = 0;
+    bool internal = false;
+    std::chrono::steady_clock::time_point bound;
+    std::chrono::steady_clock::time_point unbound;
+  };
+  // Freed ranges kept for the report; older ones are dropped.
+  static constexpr size_t kUnboundAddressBindings = 65536;
+
+  VkDebugUtilsMessengerEXT address_binding_messenger_ = VK_NULL_HANDLE;
+  mutable std::mutex address_bindings_mutex_;
+  std::unordered_multimap<uint64_t, AddressBinding> bound_address_bindings_;
+  std::deque<AddressBinding> unbound_address_bindings_;
 };
 
 }  // namespace vulkan

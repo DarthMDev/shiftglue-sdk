@@ -8616,6 +8616,7 @@ void VulkanCommandProcessor::CheckSubmissionFenceAndDeviceLoss(uint64_t await_su
       REXGPU_ERROR("Failed to await submission completion Vulkan fences: VkResult {}",
                    int32_t(wait_result));
       if (wait_result == VK_ERROR_DEVICE_LOST) {
+        GetVulkanDevice()->NoteDeviceLost();
         device_lost_ = true;
         LogCheckpoints();
       }
@@ -8629,6 +8630,7 @@ void VulkanCommandProcessor::CheckSubmissionFenceAndDeviceLoss(uint64_t await_su
         dfn.vkWaitForFences(device, 1, &submissions_in_flight_fences_[fences_awaited], VK_TRUE, 0);
     if (fence_status != VK_SUCCESS) {
       if (fence_status == VK_ERROR_DEVICE_LOST) {
+        GetVulkanDevice()->NoteDeviceLost();
         device_lost_ = true;
       }
       break;
@@ -9230,6 +9232,7 @@ bool VulkanCommandProcessor::ExecuteSubmission(
   if (submit_result != VK_SUCCESS) {
     REXGPU_ERROR("Failed to submit a Vulkan command buffer: {}", int32_t(submit_result));
     if (submit_result == VK_ERROR_DEVICE_LOST) {
+      GetVulkanDevice()->NoteDeviceLost();
       LogCheckpoints();
       if (!async_submission_) {
         device_lost_ = true;
@@ -9280,6 +9283,7 @@ void VulkanCommandProcessor::LogCheckpoints() {
   static std::mutex logged_mutex;
   static bool logged = false;
   std::lock_guard<std::mutex> logged_lock(logged_mutex);
+  GetVulkanDevice()->LogDeviceFault();
   if (!checkpoints_enabled_ || logged) {
     return;
   }

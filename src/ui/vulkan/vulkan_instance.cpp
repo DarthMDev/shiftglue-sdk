@@ -9,6 +9,7 @@
  * @modified    Tom Clay, 2026 - Adapted for ReXGlue runtime
  */
 
+#include <algorithm>
 #include <deque>
 #include <sstream>
 #include <string>
@@ -38,6 +39,12 @@ REXCVAR_DEFINE_BOOL(vulkan_validation_sync, false, "UI/Vulkan",
 #endif
 
 REXCVAR_DEFINE_BOOL(vulkan_log_debug_messages, true, "UI/Vulkan", "Log Vulkan debug messages");
+REXCVAR_DEFINE_BOOL(vulkan_device_address_bindings, false, "UI/Vulkan",
+                    "Diagnostics: track the GPU address ranges the driver binds to objects "
+                    "(VK_EXT_device_address_binding_report) and, if the device is lost, log the "
+                    "objects bound at or freed from the addresses VK_EXT_device_fault reports, "
+                    "and save the driver's crash data beside the log")
+    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 
 namespace rex {
 namespace ui {
@@ -562,6 +569,28 @@ std::unique_ptr<VulkanInstance> VulkanInstance::Create(const bool with_surface,
     }
   }
 
+  if (vulkan_instance->extensions_.ext_EXT_debug_utils &&
+      REXCVAR_GET(vulkan_device_address_bindings)) {
+    VkDebugUtilsMessengerCreateInfoEXT address_binding_messenger_create_info = {
+        VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT};
+    address_binding_messenger_create_info.messageSeverity =
+        VK_DEBUG_UTILS_MESSAGE_SEVERITY_VERBOSE_BIT_EXT |
+        VK_DEBUG_UTILS_MESSAGE_SEVERITY_INFO_BIT_EXT |
+        VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT |
+        VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT;
+    address_binding_messenger_create_info.messageType =
+        VK_DEBUG_UTILS_MESSAGE_TYPE_DEVICE_ADDRESS_BINDING_BIT_EXT;
+    address_binding_messenger_create_info.pfnUserCallback = AddressBindingMessengerCallback;
+    address_binding_messenger_create_info.pUserData = vulkan_instance.get();
+    const VkResult address_binding_messenger_create_result = ifn.vkCreateDebugUtilsMessengerEXT(
+        vulkan_instance->instance_, &address_binding_messenger_create_info, nullptr,
+        &vulkan_instance->address_binding_messenger_);
+    if (address_binding_messenger_create_result != VK_SUCCESS) {
+      REXLOG_WARN("Failed to create the Vulkan address binding messenger: {}",
+                  vk::to_string(vk::Result(address_binding_messenger_create_result)));
+    }
+  }
+
   return vulkan_instance;
 }
 
@@ -569,6 +598,9 @@ VulkanInstance::~VulkanInstance() {
   if (instance_) {
     if (debug_utils_messenger_ != VK_NULL_HANDLE) {
       functions_.vkDestroyDebugUtilsMessengerEXT(instance_, debug_utils_messenger_, nullptr);
+    }
+    if (address_binding_messenger_ != VK_NULL_HANDLE) {
+      functions_.vkDestroyDebugUtilsMessengerEXT(instance_, address_binding_messenger_, nullptr);
     }
 
     functions_.vkDestroyInstance(instance_, nullptr);
@@ -668,6 +700,94 @@ VkBool32 VulkanInstance::DebugUtilsMessengerCallback(
   }
 
   return VK_FALSE;
+}
+
+VkBool32 VulkanInstance::AddressBindingMessengerCallback(
+    [[maybe_unused]] VkDebugUtilsMessageSeverityFlagBitsEXT message_severity,
+    [[maybe_unused]] VkDebugUtilsMessageTypeFlagsEXT message_types,
+    const VkDebugUtilsMessengerCallbackDataEXT* callback_data, void* user_data) {
+  const VkDeviceAddressBindingCallbackDataEXT* binding = nullptr;
+  for (auto* next = static_cast<const VkBaseInStructure*>(callback_data->pNext); next;
+       next = next->pNext) {
+    if (next->sType == VK_STRUCTURE_TYPE_DEVICE_ADDRESS_BINDING_CALLBACK_DATA_EXT) {
+      binding = reinterpret_cast<const VkDeviceAddressBindingCallbackDataEXT*>(next);
+      break;
+    }
+  }
+  if (!binding) {
+    return VK_FALSE;
+  }
+  auto* const instance = static_cast<VulkanInstance*>(user_data);
+  AddressBinding record;
+  record.base = binding->baseAddress;
+  record.size = binding->size;
+  record.internal = (binding->flags & VK_DEVICE_ADDRESS_BINDING_INTERNAL_OBJECT_BIT_EXT) != 0;
+  if (callback_data->objectCount) {
+    record.object_type = callback_data->pObjects[0].objectType;
+    record.object_handle = callback_data->pObjects[0].objectHandle;
+  }
+  const auto now = std::chrono::steady_clock::now();
+  std::lock_guard<std::mutex> lock(instance->address_bindings_mutex_);
+  if (binding->bindingType == VK_DEVICE_ADDRESS_BINDING_TYPE_BIND_EXT) {
+    record.bound = now;
+    instance->bound_address_bindings_.emplace(record.object_handle, record);
+    return VK_FALSE;
+  }
+  auto [first, last] = instance->bound_address_bindings_.equal_range(record.object_handle);
+  for (auto it = first; it != last; ++it) {
+    if (it->second.base == record.base) {
+      record.bound = it->second.bound;
+      instance->bound_address_bindings_.erase(it);
+      break;
+    }
+  }
+  record.unbound = now;
+  instance->unbound_address_bindings_.push_back(record);
+  if (instance->unbound_address_bindings_.size() > kUnboundAddressBindings) {
+    instance->unbound_address_bindings_.pop_front();
+  }
+  return VK_FALSE;
+}
+
+std::vector<std::string> VulkanInstance::DescribeDeviceAddress(uint64_t address,
+                                                               uint64_t size) const {
+  std::vector<std::string> lines;
+  const auto now = std::chrono::steady_clock::now();
+  const auto ms_ago = [&](std::chrono::steady_clock::time_point time) {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(now - time).count();
+  };
+  const uint64_t end = address + std::max<uint64_t>(size, 1);
+  std::lock_guard<std::mutex> lock(address_bindings_mutex_);
+  const auto describe = [&](const AddressBinding& binding) {
+    return fmt::format("{} 0x{:x}{} at {:016X}..{:016X}",
+                       vk::to_string(vk::ObjectType(binding.object_type)), binding.object_handle,
+                       binding.internal ? " (driver-internal)" : "", binding.base,
+                       binding.base + binding.size);
+  };
+  // The nearest object ending below the address: an access past its end lands in the gap.
+  const AddressBinding* below = nullptr;
+  for (const auto& [handle, binding] : bound_address_bindings_) {
+    if (binding.base < end && address < binding.base + binding.size) {
+      lines.push_back(
+          fmt::format("bound: {}, since {} ms ago", describe(binding), ms_ago(binding.bound)));
+    } else if (binding.base + binding.size <= address &&
+               (!below || binding.base + binding.size > below->base + below->size)) {
+      below = &binding;
+    }
+  }
+  if (below) {
+    lines.push_back(fmt::format("nearest bound below: {}, the address {} bytes past its end",
+                                describe(*below), address - (below->base + below->size)));
+  }
+  for (auto it = unbound_address_bindings_.rbegin(); it != unbound_address_bindings_.rend(); ++it) {
+    if (it->base < end && address < it->base + it->size) {
+      lines.push_back(fmt::format("unbound {} ms ago: {}", ms_ago(it->unbound), describe(*it)));
+      if (lines.size() >= 16) {
+        break;
+      }
+    }
+  }
+  return lines;
 }
 
 }  // namespace vulkan

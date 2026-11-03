@@ -10,6 +10,7 @@
  * @modified    Tom Clay, 2026 - Adapted for ReXGlue runtime
  */
 
+#include <atomic>
 #include <memory>
 #include <mutex>
 #include <vector>
@@ -198,6 +199,17 @@ class VulkanDevice {
 
     bool pipelineFragmentShadingRate = false;
 
+    // VK_EXT_device_fault (#342); the vendor binary only with
+    // vulkan_device_address_bindings.
+
+    bool deviceFault = false;
+    bool deviceFaultVendorBinary = false;
+
+    // VK_EXT_device_address_binding_report (#355), only with
+    // vulkan_device_address_bindings.
+
+    bool reportAddressBinding = false;
+
     // Descriptor indexing (promoted to 1.2), for bindless textures
     // (RECORDER_PER_DRAW_BACKLOG PD-4). Enabled only on Vulkan 1.2+ devices.
 
@@ -257,6 +269,10 @@ class VulkanDevice {
     bool ext_KHR_pipeline_executable_properties = false;  // #270
     // Has optional features not implied by this being true.
     bool ext_KHR_fragment_shading_rate = false;  // #227
+    // Has optional features not implied by this being true.
+    bool ext_EXT_device_fault = false;  // #342
+    // Only with vulkan_device_address_bindings.
+    bool ext_EXT_device_address_binding_report = false;  // #355
   };
 
   const Extensions& extensions() const { return extensions_; }
@@ -294,6 +310,8 @@ class VulkanDevice {
 #include <rex/ui/vulkan/functions/device_ext_hdr_metadata.inc>
     // VK_KHR_fragment_shading_rate (#227)
 #include <rex/ui/vulkan/functions/device_khr_fragment_shading_rate.inc>
+    // VK_EXT_device_fault (#342)
+#include <rex/ui/vulkan/functions/device_ext_device_fault.inc>
 #undef XE_UI_VULKAN_FUNCTION_PROMOTED
 #undef XE_UI_VULKAN_FUNCTION
   };
@@ -313,6 +331,14 @@ class VulkanDevice {
       }
     }
   }
+
+  // Where a call returned VK_ERROR_DEVICE_LOST: VK_EXT_device_fault may only be
+  // queried on a lost device, and a loss is also declared without one.
+  void NoteDeviceLost() const { device_lost_.store(true, std::memory_order_relaxed); }
+  // After a device loss: logs what VK_EXT_device_fault tells about it, with the
+  // objects bound at or last unbound from each faulting address when
+  // vulkan_device_address_bindings tracks them. Once per process.
+  void LogDeviceFault() const;
 
   // Debug names for objects (VK_EXT_debug_utils), for capture tools.
   bool object_names_enabled() const { return object_names_enabled_; }
@@ -393,6 +419,8 @@ class VulkanDevice {
   Functions functions_;
 
   bool object_names_enabled_ = false;
+
+  mutable std::atomic<bool> device_lost_{false};
 
   std::vector<QueueFamily> queue_families_;
   uint32_t queue_family_graphics_compute_ = UINT32_MAX;
