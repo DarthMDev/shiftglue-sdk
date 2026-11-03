@@ -1004,6 +1004,9 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
     }
     // DLSS allocates and takes the addresses of device-address memory.
     features_1_2.enabled.bufferDeviceAddress = features_1_2.supported.bufferDeviceAddress;
+    // FidelityFX creates shaders with 16-bit types on devices that support them.
+    features_1_2.enabled.shaderFloat16 = features_1_2.supported.shaderFloat16;
+    enabled_features.shaderInt16 = supported_features.shaderInt16;
   } else {
     if (ext_1_2_KHR_sampler_mirror_clamp_to_edge) {
       XE_UI_VULKAN_FEATURE_IMPLIED(samplerMirrorClampToEdge)
