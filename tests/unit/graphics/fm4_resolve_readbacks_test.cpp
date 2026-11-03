@@ -54,6 +54,17 @@ TEST_CASE("a run after a short gap is read back while the range is new",
   CHECK_FALSE(next.read_back);
 }
 
+TEST_CASE("every run is read back in its first frames while every_run is set",
+          "[graphics][readbacks]") {
+  Readbacks r;
+  r.Frames(1, 3);
+  CHECK_FALSE(r.A(200).read_back);
+  CHECK(r.readbacks.Resolve(kAddress, kLength, 210, false, true).read_back);
+  CHECK(r.readbacks.Resolve(kAddress, kLength, 211, false, true).read_back);
+  CHECK_FALSE(r.readbacks.Resolve(kAddress, kLength, 212, false, true).read_back);
+  CHECK_FALSE(r.readbacks.IsFirstRun(kAddress, kLength));
+}
+
 TEST_CASE("a range idle longer than kIdleFrames is new again", "[graphics][readbacks]") {
   Readbacks r;
   r.A(1);

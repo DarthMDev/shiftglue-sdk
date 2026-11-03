@@ -35,8 +35,10 @@ class Fm4ResolveReadbacks {
     uint64_t new_since_frames = 0;
     uint64_t previous_run_frames = 0;
   };
-  // One resolve to [address, address + length) in `frame` (frames count from 1).
-  Decision Resolve(uint32_t address, uint32_t length, uint64_t frame, bool read_all);
+  // One resolve to [address, address + length) in `frame` (frames count from 1). With
+  // `every_run`, the first frames of every run are read back, not only a new range's.
+  Decision Resolve(uint32_t address, uint32_t length, uint64_t frame, bool read_all,
+                   bool every_run = false);
   // Whether the range's current run began while it was new, so the guest may process it at
   // once and an async readback still waits for it; true for a range never resolved.
   bool IsFirstRun(uint32_t address, uint32_t length) const;
