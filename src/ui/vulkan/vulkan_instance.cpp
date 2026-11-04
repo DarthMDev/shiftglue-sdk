@@ -21,6 +21,7 @@
 #include <rex/cvar.h>
 #include <rex/logging.h>
 #include <rex/platform.h>
+#include <rex/platform/env.h>
 #include <rex/ui/vulkan/instance.h>
 #include <rex/ui/vulkan/upscaler.h>
 #include <rex/ui/vulkan/presenter.h>
@@ -30,7 +31,6 @@ REXCVAR_DEFINE_BOOL(vulkan_validation_sync, false, "UI/Vulkan",
                     "layer's synchronization validation (hazards between GPU work)")
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 #if REX_PLATFORM_ANDROID
-#include <rex/platform/env.h>
 #include <rex/ui/vulkan/android_gpu_driver.h>
 #endif
 
@@ -409,6 +409,21 @@ std::unique_ptr<VulkanInstance> VulkanInstance::Create(const bool with_surface,
     instance_create_info.pNext = &validation_features;
     REXLOG_INFO("Vulkan validation: synchronization validation enabled");
   }
+  // The loader tells why it rejects the instance (no driver found, a driver manifest that fails to
+  // load) only to a messenger chained into the create info; the instance's own messenger comes
+  // too late for that.
+  VkDebugUtilsMessengerCreateInfoEXT loader_messenger_create_info = {};
+  if (vulkan_instance->extensions_.ext_EXT_debug_utils) {
+    loader_messenger_create_info.sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT;
+    loader_messenger_create_info.pNext = instance_create_info.pNext;
+    loader_messenger_create_info.messageSeverity = VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT |
+                                                   VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT;
+    loader_messenger_create_info.messageType = VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT |
+                                               VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT |
+                                               VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT;
+    loader_messenger_create_info.pfnUserCallback = DebugUtilsMessengerCallback;
+    instance_create_info.pNext = &loader_messenger_create_info;
+  }
   VkResult instance_create_result =
       ifn.vkCreateInstance(&instance_create_info, nullptr, &vulkan_instance->instance_);
 
@@ -430,6 +445,15 @@ std::unique_ptr<VulkanInstance> VulkanInstance::Create(const bool with_surface,
   if (instance_create_result != VK_SUCCESS) {
     REXLOG_ERROR("Failed to create a Vulkan instance: {}",
                  vk::to_string(vk::Result(instance_create_result)));
+    // Any of these, left set by another program, can hide every driver from the loader.
+    for (const char* name :
+         {"VK_DRIVER_FILES", "VK_ICD_FILENAMES", "VK_ADD_DRIVER_FILES", "VK_LOADER_DRIVERS_SELECT",
+          "VK_LOADER_DRIVERS_DISABLE", "VK_LAYER_PATH", "VK_ADD_LAYER_PATH", "VK_INSTANCE_LAYERS",
+          "VK_LOADER_LAYERS_ENABLE", "VK_LOADER_LAYERS_DISABLE", "VK_LOADER_DEBUG"}) {
+      if (const auto value = rex::platform::env::get(name)) {
+        REXLOG_ERROR("Vulkan loader environment: {}={}", name, *value);
+      }
+    }
     return nullptr;
   }
 
