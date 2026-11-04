@@ -13,7 +13,7 @@ namespace rex::graphics {
 
 Fm4ResolveReadbacks::Decision Fm4ResolveReadbacks::Resolve(uint32_t address, uint32_t length,
                                                            uint64_t frame, bool read_all,
-                                                           bool every_run) {
+                                                           bool held) {
   // As the D3D12 executor: the first frames of each run of resolves to a new
   // range are read back: car thumbnails the game saves, the 32x512 blurred
   // asphalt strips FM4 compresses on the CPU at race load, and the 8x8 cube
@@ -28,10 +28,11 @@ Fm4ResolveReadbacks::Decision Fm4ResolveReadbacks::Resolve(uint32_t address, uin
   // So is a resolve to a range already resolved more times this frame than in
   // the previous one: a capture drawn after the frame into one of its own
   // targets, such as the photo mode picture the game encodes (#399).
-  // `every_run` (FM4's menus) drops the idle rule there: after races, a home
-  // space switch turned the menu car pink (fm4-static-recomp #52), the same
-  // tint as a stale environment map; a rerun within the idle frames with no
-  // readback over it since is the one way the rule leaves that map unread.
+  // `held` (FM4's menus) reads back every run's first kHeldRunReadbackFrames,
+  // new or not: a home space switch resolves that environment map first with
+  // only its magenta clear and again once the space has loaded. A load within
+  // kRunGapFrames puts the real map inside the same run, past its first frames,
+  // and the menu car stayed pink (fm4-static-recomp #52).
   const uint64_t key = (uint64_t(address) << 32) | length;
   Range& range = ranges_[key];
   if (range.count_frame != frame) {
@@ -73,11 +74,12 @@ Fm4ResolveReadbacks::Decision Fm4ResolveReadbacks::Resolve(uint32_t address, uin
   }
   range.last_used_frame = frame;
   const bool extra = range.previous_count && range.count > range.previous_count;
+  const uint64_t run_readback_frames = held ? kHeldRunReadbackFrames : kRunReadbackFrames;
   decision.read_back = read_all || extra ||
-                       (frame < range.run_start_frame + kRunReadbackFrames &&
-                        (every_run || frame < range.new_since_frame + kNewFrames));
+                       (frame < range.run_start_frame + run_readback_frames &&
+                        (held || frame < range.new_since_frame + kNewFrames));
   decision.read_back_before = range.readback_sequence != 0;
-  decision.log = decision.run_start || frame == range.run_start_frame + kRunReadbackFrames;
+  decision.log = decision.run_start || frame == range.run_start_frame + run_readback_frames;
   decision.new_since_frames = frame - range.new_since_frame;
   if (decision.read_back) range.readback_sequence = ++readback_sequence_;
   return decision;

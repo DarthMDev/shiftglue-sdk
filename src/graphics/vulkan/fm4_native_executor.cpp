@@ -58,9 +58,10 @@ REXCVAR_DEFINE_BOOL(fh1_async_readbacks, false, "GPU",
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 REXCVAR_DEFINE_BOOL(fh1_async_readbacks_hold, false, "GPU",
                     "Read live: while set, readbacks wait as without fh1_async_readbacks, and "
-                    "every run of resolves into a range is read back at its start, not only a "
-                    "new range's. A game sets it where it caches what it computes from a "
-                    "capture read too early or from stale bytes (FM4: the menu car's lighting)");
+                    "the first 16 frames of every run of resolves into a range are read back, "
+                    "not only a new range's first 2. A game sets it where it caches what it "
+                    "computes from a capture read too early or from stale bytes (FM4: the menu "
+                    "car's lighting)");
 REXCVAR_DEFINE_BOOL(fh1_async_recurring_readbacks, true, "GPU",
                     "Read live: with fh1_async_readbacks, the first run of a capture the game "
                     "keeps re-rendering does not wait either when it is new again only after "
