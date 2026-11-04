@@ -287,6 +287,7 @@ class VulkanCommandProcessor : public CommandProcessor {
     kNote,
     kCompute,
   };
+    kSubmission,
   // Without a value, the current draw index in the frame. Inline so that with
   // the option off a call costs one branch and builds no string.
   void Checkpoint(CheckpointKind kind, uint32_t value = UINT32_MAX, std::string_view detail = {}) {

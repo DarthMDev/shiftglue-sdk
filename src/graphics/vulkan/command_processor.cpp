@@ -9122,6 +9122,7 @@ bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
       const bool flush_textures =
           std::filesystem::remove(dump_dir / "flush_textures", error) || flush_memory;
       if (flush_textures && AwaitAllQueueOperationsCompletion()) {
+    Checkpoint(CheckpointKind::kSubmission, uint32_t(GetCurrentSubmission()), "start");
         if (flush_memory) {
           shared_memory_->SetSystemPageBlocksValidWithGpuDataWritten();
         }
@@ -9308,7 +9309,7 @@ void VulkanCommandProcessor::LogCheckpoints() {
   dfn.vkGetQueueCheckpointDataNV(queue_acquisition.queue(), &count, checkpoints.data());
   static const char* const kKinds[] = {"?",        "draw",     "copy",     "texture load",
                                        "resolve",  "transfer", "clear",    "draw end",
-                                       "texture load end", "note", "compute"};
+                                       "texture load end", "note", "compute", "submission"};
   auto describe = [&](uint64_t serial) {
     if (serial >> 63) {
       static const char* const kPaintStages[] = {"paint", "upscale", "upscale end", "paint end"};

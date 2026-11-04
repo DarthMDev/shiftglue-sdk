@@ -65,6 +65,7 @@ void SyncMacMetalLayerDrawableSize(const void* metal_layer, const VkExtent2D& ex
 }  // namespace
 #endif
 
+REXCVAR_DECLARE(bool, vulkan_diagnostic_checkpoints_serialize);
 REXCVAR_DEFINE_BOOL(present_upscaler_profile, false, "UI/Presenter",
                     "Time the temporal upscaler on the GPU and log the mean of every 300 "
                     "upscales");
@@ -2291,8 +2292,17 @@ Presenter::PaintResult VulkanPresenter::PaintAndPresentImpl(bool execute_ui_draw
 
   VkCommandBuffer draw_command_buffer = paint_submission.draw_command_buffer();
   // Top bit: told apart from the command processor's serials when it reports a lost device.
+  const bool serialize_checkpoints = REXCVAR_GET(vulkan_diagnostic_checkpoints_serialize);
   const auto paint_checkpoint = [&](uint64_t stage) {
     if (vulkan_device_->extensions().ext_NV_device_diagnostic_checkpoints) {
+      if (serialize_checkpoints) {
+        VkMemoryBarrier barrier = {VK_STRUCTURE_TYPE_MEMORY_BARRIER, nullptr,
+                                   VK_ACCESS_MEMORY_WRITE_BIT,
+                                   VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT};
+        dfn.vkCmdPipelineBarrier(draw_command_buffer, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+                                 VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 1, &barrier, 0, nullptr,
+                                 0, nullptr);
+      }
       dfn.vkCmdSetCheckpointNV(
           draw_command_buffer,
           reinterpret_cast<const void*>(

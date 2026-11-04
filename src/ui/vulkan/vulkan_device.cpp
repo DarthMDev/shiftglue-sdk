@@ -37,6 +37,12 @@ REXCVAR_DEFINE_BOOL(vulkan_diagnostic_checkpoints, false, "UI/Vulkan",
                     "passes with VK_NV_device_diagnostic_checkpoints and log the last ones the "
                     "GPU reached if the device is lost")
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+REXCVAR_DEFINE_BOOL(vulkan_diagnostic_checkpoints_serialize, false, "UI/Vulkan",
+                    "Diagnostics: with vulkan_diagnostic_checkpoints, the GPU finishes all "
+                    "earlier work before each checkpoint outside a render pass, so a lost "
+                    "device is reported after the work that faulted, not only after how far "
+                    "the command stream got while earlier work still ran (slow)")
+    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 REXCVAR_DECLARE(bool, vulkan_device_address_bindings);
 REXCVAR_DEFINE_BOOL(vulkan_pipeline_statistics, false, "UI/Vulkan",
                     "Diagnostics: log the driver's statistics (instructions, registers, "
