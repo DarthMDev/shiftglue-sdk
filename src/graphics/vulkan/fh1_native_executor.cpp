@@ -2897,8 +2897,18 @@ bool Fh1NativeExecutor::ResolveToMemory(const SourceRect& source, const SurfaceK
                                                                   : "fh1 resolve");
   // 16x16 groups, as fh1_native_resolve_memory.cs.hlsl's Vulkan variants.
   if (!REXCVAR_GET(fh1_debug_skip_resolve_dispatches)) {
+    if (command_processor_.checkpoints_enabled()) {
+      command_processor_.Checkpoint(
+          VulkanCommandProcessor::CheckpointKind::kCompute, UINT32_MAX,
+          fmt::format("resolve to memory {:08X} pitch {} {}x{} buffer offset {:X} range {:X}{}",
+                      dest_base, dest_pitch, rect.right - rect.left, rect.bottom - rect.top,
+                      memory_offset, memory_range,
+                      image_view != VK_NULL_HANDLE ? " + texture" : ""));
+    }
     command_buffer.CmdVkDispatch((uint32_t(rect.right - rect.left) + 15) / 16,
                                  (uint32_t(rect.bottom - rect.top) + 15) / 16, 1);
+    command_processor_.Checkpoint(VulkanCommandProcessor::CheckpointKind::kCompute, UINT32_MAX,
+                                  "resolve to memory end");
   }
   command_processor_.EndDebugLabel();
   return true;

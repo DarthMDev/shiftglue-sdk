@@ -4603,7 +4603,9 @@ void VulkanCommandProcessor::IssueSwapImpl(uint32_t frontbuffer_ptr, uint32_t fr
           BindExternalComputePipeline(swap_apply_gamma_compute_pipeline);
           uint32_t group_count_x = (guest_output_width + 15) / 16;
           uint32_t group_count_y = (guest_output_height + 7) / 8;
+          Checkpoint(CheckpointKind::kCompute, UINT32_MAX, "swap gamma");
           deferred_command_buffer_.CmdVkDispatch(group_count_x, group_count_y, 1);
+          Checkpoint(CheckpointKind::kCompute, UINT32_MAX, "swap gamma end");
 
           if (use_fxaa) {
             // Make the FXAA source image readable and bind a separate
@@ -4671,7 +4673,9 @@ void VulkanCommandProcessor::IssueSwapImpl(uint32_t frontbuffer_ptr, uint32_t fr
                                                           VK_SHADER_STAGE_COMPUTE_BIT, 0,
                                                           sizeof(constants), &constants);
               BindExternalComputePipeline(swap_scene_post_pipeline_);
+              Checkpoint(CheckpointKind::kCompute, UINT32_MAX, "swap scene post");
               deferred_command_buffer_.CmdVkDispatch(group_count_x, group_count_y, 1);
+              Checkpoint(CheckpointKind::kCompute, UINT32_MAX, "swap scene post end");
             } else {
               VkDescriptorSet swap_descriptor_fxaa_source =
                   swap_descriptors_fxaa_source_[swap_frame_index];
@@ -4728,7 +4732,9 @@ void VulkanCommandProcessor::IssueSwapImpl(uint32_t frontbuffer_ptr, uint32_t fr
               BindExternalComputePipeline(swap_post_effect == SwapPostEffect::kFxaaExtreme
                                               ? swap_fxaa_extreme_pipeline_
                                               : swap_fxaa_pipeline_);
+              Checkpoint(CheckpointKind::kCompute, UINT32_MAX, "swap fxaa");
               deferred_command_buffer_.CmdVkDispatch(group_count_x, group_count_y, 1);
+              Checkpoint(CheckpointKind::kCompute, UINT32_MAX, "swap fxaa end");
             }
           }
 
@@ -4765,7 +4771,9 @@ void VulkanCommandProcessor::IssueSwapImpl(uint32_t frontbuffer_ptr, uint32_t fr
                                                         VK_SHADER_STAGE_COMPUTE_BIT, 0,
                                                         sizeof(hud_mask_size), hud_mask_size);
             BindExternalComputePipeline(swap_hud_mask_pipeline_);
+            Checkpoint(CheckpointKind::kCompute, UINT32_MAX, "swap hud mask");
             deferred_command_buffer_.CmdVkDispatch(group_count_x, group_count_y, 1);
+            Checkpoint(CheckpointKind::kCompute, UINT32_MAX, "swap hud mask end");
           }
 
           // UP-1.2: the guest output without the HUD, for a temporal
@@ -4836,7 +4844,9 @@ void VulkanCommandProcessor::IssueSwapImpl(uint32_t frontbuffer_ptr, uint32_t fr
                 swap_apply_gamma_compute_pipeline_layout_, VK_SHADER_STAGE_COMPUTE_BIT, 0,
                 sizeof(hudless_gamma_constants), &hudless_gamma_constants);
             BindExternalComputePipeline(hudless_gamma_pipeline);
+            Checkpoint(CheckpointKind::kCompute, UINT32_MAX, "swap hudless gamma");
             deferred_command_buffer_.CmdVkDispatch(group_count_x, group_count_y, 1);
+            Checkpoint(CheckpointKind::kCompute, UINT32_MAX, "swap hudless gamma end");
 
             PushImageMemoryBarrier(hudless_image, guest_output_subresource_range,
                                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
@@ -4854,7 +4864,9 @@ void VulkanCommandProcessor::IssueSwapImpl(uint32_t frontbuffer_ptr, uint32_t fr
                                                         sizeof(hudless_mask_size),
                                                         hudless_mask_size);
             BindExternalComputePipeline(swap_hud_mask_pipeline_);
+            Checkpoint(CheckpointKind::kCompute, UINT32_MAX, "swap hudless mask");
             deferred_command_buffer_.CmdVkDispatch(group_count_x, group_count_y, 1);
+            Checkpoint(CheckpointKind::kCompute, UINT32_MAX, "swap hudless mask end");
 
             PushImageMemoryBarrier(hudless_image, guest_output_subresource_range,
                                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
@@ -9246,11 +9258,8 @@ bool VulkanCommandProcessor::ExecuteSubmission(
   return recorded;
 }
 
-void VulkanCommandProcessor::Checkpoint(CheckpointKind kind, uint32_t value,
-                                        std::string detail) {
-  if (!checkpoints_enabled_) {
-    return;
-  }
+void VulkanCommandProcessor::RecordCheckpoint(CheckpointKind kind, uint32_t value,
+                                              std::string_view detail) {
   if (value == UINT32_MAX) {
     value = debug_frame_draw_index_ - 1;
   }
@@ -9260,21 +9269,18 @@ void VulkanCommandProcessor::Checkpoint(CheckpointKind kind, uint32_t value,
   record.kind = kind;
   record.frame = uint32_t(observation_frame_sequence_);
   record.value = value;
-  record.detail = std::move(detail);
+  record.detail = detail;
   deferred_command_buffer_.CmdVkSetCheckpointNV(serial);
 }
 
-void VulkanCommandProcessor::NoteCheckpoint(std::string detail) {
-  if (!checkpoints_enabled_) {
-    return;
-  }
+void VulkanCommandProcessor::RecordNoteCheckpoint(std::string_view detail) {
   const uint64_t serial = ++checkpoint_serial_;
   CheckpointRecord& record = checkpoint_records_[serial & (kCheckpointRecords - 1)];
   record.serial = serial;
   record.kind = CheckpointKind::kNote;
   record.frame = uint32_t(observation_frame_sequence_);
   record.value = debug_frame_draw_index_ - 1;
-  record.detail = std::move(detail);
+  record.detail = detail;
 }
 
 void VulkanCommandProcessor::LogCheckpoints() {

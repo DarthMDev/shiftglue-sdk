@@ -287,11 +287,16 @@ class VulkanCommandProcessor : public CommandProcessor {
     kNote,
     kCompute,
   };
-  // Without a value, the current draw index in the frame.
-  void Checkpoint(CheckpointKind kind, uint32_t value = UINT32_MAX, std::string detail = {});
+  // Without a value, the current draw index in the frame. Inline so that with
+  // the option off a call costs one branch and builds no string.
+  void Checkpoint(CheckpointKind kind, uint32_t value = UINT32_MAX, std::string_view detail = {}) {
+    if (checkpoints_enabled_) RecordCheckpoint(kind, value, detail);
+  }
   bool checkpoints_enabled() const { return checkpoints_enabled_; }
   // A CPU-side record in the checkpoint ring (resource lifetimes, bindings).
-  void NoteCheckpoint(std::string detail);
+  void NoteCheckpoint(std::string_view detail) {
+    if (checkpoints_enabled_) RecordNoteCheckpoint(detail);
+  }
   // vulkan_debug_labels: names GPU work for capture tools (Nsight Graphics
   // GPU Trace, RenderDoc). Labels must not straddle a rendering's begin or
   // end; FH1 renderings label themselves.
@@ -506,6 +511,8 @@ class VulkanCommandProcessor : public CommandProcessor {
   // an AMD driver fails a wait for a fence that was never submitted).
   void AwaitSubmissionWorkerSubmitted(uint64_t submission);
   void LogCheckpoints();
+  void RecordCheckpoint(CheckpointKind kind, uint32_t value, std::string_view detail);
+  void RecordNoteCheckpoint(std::string_view detail);
   bool checkpoints_enabled_ = false;
   // What each recent checkpoint serial was, for the device-loss report.
   struct CheckpointRecord {

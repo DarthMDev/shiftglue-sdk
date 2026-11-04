@@ -1233,7 +1233,9 @@ bool VulkanRenderTargetCache::Resolve(const memory::Memory& memory,
                 sizeof(copy_shader_constants), &copy_shader_constants);
           }
           command_processor_.SubmitBarriers(true);
+          command_processor_.Checkpoint(VulkanCommandProcessor::CheckpointKind::kCompute, UINT32_MAX, "resolve copy");
           command_buffer.CmdVkDispatch(copy_group_count_x, copy_group_count_y, 1);
+          command_processor_.Checkpoint(VulkanCommandProcessor::CheckpointKind::kCompute, UINT32_MAX, "resolve copy end");
 
           // Invalidate textures and mark the range as scaled if needed.
           texture_cache.MarkRangeAsResolved(resolve_info.copy_dest_extent_start,
@@ -1292,7 +1294,9 @@ bool VulkanRenderTargetCache::Resolve(const memory::Memory& memory,
                                             VK_SHADER_STAGE_COMPUTE_BIT, 0,
                                             sizeof(depth_clear_constants), &depth_clear_constants);
           command_processor_.SubmitBarriers(true);
+          command_processor_.Checkpoint(VulkanCommandProcessor::CheckpointKind::kCompute, UINT32_MAX, "resolve depth clear");
           command_buffer.CmdVkDispatch(clear_group_count.first, clear_group_count.second, 1);
+          command_processor_.Checkpoint(VulkanCommandProcessor::CheckpointKind::kCompute, UINT32_MAX, "resolve depth clear end");
         }
         if (clear_color) {
           command_processor_.BindExternalComputePipeline(
@@ -1312,7 +1316,9 @@ bool VulkanRenderTargetCache::Resolve(const memory::Memory& memory,
                 sizeof(color_clear_constants), &color_clear_constants);
           }
           command_processor_.SubmitBarriers(true);
+          command_processor_.Checkpoint(VulkanCommandProcessor::CheckpointKind::kCompute, UINT32_MAX, "resolve color clear");
           command_buffer.CmdVkDispatch(clear_group_count.first, clear_group_count.second, 1);
+          command_processor_.Checkpoint(VulkanCommandProcessor::CheckpointKind::kCompute, UINT32_MAX, "resolve color clear end");
         }
         MarkEdramBufferModified();
         cleared = true;
@@ -4600,7 +4606,9 @@ void VulkanRenderTargetCache::PerformTransfersAndResolveClears(
             uint32_t(offsetof(HostDepthStoreConstants, rectangle)),
             sizeof(host_depth_store_rectangle_constant), &host_depth_store_rectangle_constant);
         command_processor_.SubmitBarriers(true);
+        command_processor_.Checkpoint(VulkanCommandProcessor::CheckpointKind::kCompute, UINT32_MAX, "host depth store");
         command_buffer.CmdVkDispatch(group_count_x, group_count_y, 1);
+        command_processor_.Checkpoint(VulkanCommandProcessor::CheckpointKind::kCompute, UINT32_MAX, "host depth store end");
         MarkEdramBufferModified();
       }
     }
