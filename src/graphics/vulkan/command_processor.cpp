@@ -29,6 +29,7 @@
 #include <rex/assert.h>
 #include <rex/cvar.h>
 #include <rex/dbg.h>
+#include <rex/filesystem.h>
 #include <bit>
 #include <chrono>
 
@@ -307,6 +308,18 @@ REXCVAR_DEFINE_BOOL(gpu_draw_unchanged_inputs_verify, false, "GPU/Vulkan",
                     "With gpu_draw_unchanged_inputs, derive every stage in full anyway and "
                     "count the draws whose skipped stage would have differed")
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
+REXCVAR_DEFINE_BOOL(vulkan_verify_draw_fetches, false, "GPU/Vulkan",
+                    "Diagnostics: while fh1_readback_all_resolves_hold is set (FM4: a car "
+                    "thumbnail's render), copy back the GPU's copy of every vertex buffer and "
+                    "guest DMA index range a draw reads, at the draw, and log the ranges that "
+                    "differ from guest memory at record time")
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+REXCVAR_DEFINE_BOOL(vulkan_verify_draw_fetches_list, false, "GPU/Vulkan",
+                    "Diagnostics: with vulkan_verify_draw_fetches, write every draw of each "
+                    "window (shaders, indices, vertex fetch ranges and their page state) to "
+                    "fetch-window-<n>.txt beside the log file")
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+REXCVAR_DECLARE(bool, fh1_readback_all_resolves_hold);
 REXCVAR_DEFINE_BOOL(gpu_constant_census, false, "GPU/Vulkan",
                     "Count constant buffer uploads by buffer, their bytes and repeats, logged "
                     "every 600 frames (RECORDER_REPLAY_BACKLOG RR-2.1); apart from the draw "
@@ -3034,6 +3047,7 @@ void VulkanCommandProcessor::ShutdownContext() {
     }
   }
   memexport_readback_buffers_.clear();
+  DestroyFetchVerifyChunks();
 
   resolve_downscale_buffer_size_ = 0;
   ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroyBuffer, device, resolve_downscale_buffer_);
@@ -7604,6 +7618,12 @@ bool VulkanCommandProcessor::IssueDrawImpl(xenos::PrimitiveType prim_type, uint3
     }
   }
 
+  if (REXCVAR_GET(vulkan_verify_draw_fetches)) {
+    VerifyDrawFetches(vertex_shader->constant_register_map(), vertex_shader->ucode_data_hash(),
+                      pixel_shader ? pixel_shader->ucode_data_hash() : 0,
+                      primitive_processing_result);
+  }
+
   // Insert the shared memory barrier if needed.
   // TODO(Triang3l): Find some PM4 command that can be used for indication of
   // when memexports should be awaited instead of inserting the barrier in Use
@@ -7857,6 +7877,316 @@ bool VulkanCommandProcessor::IssueDraw_MemexportReadbackFullPath(uint32_t total_
   dfn.vkDestroyBuffer(device, readback_buffer, nullptr);
   dfn.vkFreeMemory(device, readback_memory, nullptr);
   return true;
+}
+
+void VulkanCommandProcessor::VerifyDrawFetches(
+    const Shader::ConstantRegisterMap& vertex_constants, uint64_t vertex_shader_hash,
+    uint64_t pixel_shader_hash, const PrimitiveProcessor::ProcessingResult& primitive) {
+  const bool window = REXCVAR_GET(fh1_readback_all_resolves_hold);
+  if (window != fetch_verify_window_) {
+    fetch_verify_window_ = window;
+    if (window) {
+      fetch_verify_stats_ = {};
+      fetch_verify_summary_due_ = false;
+      ++fetch_verify_windows_;
+      const std::string& log_file = REXCVAR_GET(log_file);
+      if (REXCVAR_GET(vulkan_verify_draw_fetches_list) && !log_file.empty()) {
+        const std::filesystem::path path =
+            rex::to_path(log_file).parent_path() /
+            fmt::format("fetch-window-{}.txt", fetch_verify_windows_);
+        fetch_verify_list_.open(path);
+        REXGPU_INFO("Fetch verify: window {} started, draws listed in {}", fetch_verify_windows_,
+                    rex::path_to_utf8(path));
+      } else {
+        REXGPU_INFO("Fetch verify: window {} started", fetch_verify_windows_);
+      }
+    } else {
+      fetch_verify_summary_due_ = true;
+      fetch_verify_list_.close();
+    }
+  }
+  if (!window) {
+    return;
+  }
+  FetchVerifyStats& stats = fetch_verify_stats_;
+  const uint64_t draw = ++stats.draws;
+
+  struct Wanted {
+    int32_t fetch;
+    uint32_t address;
+    uint32_t size;
+  };
+  std::vector<Wanted> wanted;
+  const RegisterFile& regs = *register_file_;
+  for (uint32_t i = 0; i < rex::countof(vertex_constants.vertex_fetch_bitmap); ++i) {
+    uint32_t bits = vertex_constants.vertex_fetch_bitmap[i];
+    uint32_t j;
+    while (rex::bit_scan_forward(bits, &j)) {
+      bits &= ~(uint32_t(1) << j);
+      const uint32_t index = i * 32 + j;
+      const xenos::xe_gpu_vertex_fetch_t vfetch = regs.GetVertexFetch(index);
+      if (vfetch.type == xenos::FetchConstantType::kVertex ||
+          vfetch.type == xenos::FetchConstantType::kInvalidVertex) {
+        wanted.push_back({int32_t(index), uint32_t(vfetch.address) << 2, uint32_t(vfetch.size) << 2});
+      }
+    }
+  }
+  if (primitive.index_buffer_type == PrimitiveProcessor::ProcessedIndexBufferType::kGuestDMA) {
+    wanted.push_back(
+        {-1, primitive.guest_index_base,
+         primitive.host_draw_vertex_count *
+             (primitive.host_index_format == xenos::IndexFormat::kInt16 ? 2u : 4u)});
+  } else if (primitive.index_buffer_type ==
+             PrimitiveProcessor::ProcessedIndexBufferType::kHostConverted) {
+    // The GPU reads the CPU's conversion from mapped memory. A strip keeps its indices: only
+    // the reset index becomes all ones, and 32-bit output is masked to 24 bits, byte-swapped or
+    // widened from 16 bits depending on the guest format. The buffer is consistent when one of
+    // those transforms explains every index.
+    const uint8_t* const host =
+        primitive_processor_->GetConvertedIndexBufferMapping(primitive.host_index_buffer_handle);
+    if (host && primitive.host_primitive_type == primitive.guest_primitive_type &&
+        primitive.host_draw_vertex_count == primitive.guest_draw_vertex_count) {
+      const uint32_t count = primitive.host_draw_vertex_count;
+      const uint8_t* const guest = memory_->TranslatePhysical<const uint8_t*>(primitive.guest_index_base);
+      const bool host_16 = primitive.host_index_format == xenos::IndexFormat::kInt16;
+      auto host_index = [&](uint32_t i) -> uint32_t {
+        return host_16 ? reinterpret_cast<const uint16_t*>(host)[i]
+                       : reinterpret_cast<const uint32_t*>(host)[i];
+      };
+      constexpr xenos::Endian kEndians[] = {xenos::Endian::kNone, xenos::Endian::k8in16,
+                                            xenos::Endian::k8in32, xenos::Endian::k16in32};
+      // 0: 16-bit as is; 1-4: 32-bit swapped by kEndians, then masked; 5-8: 32-bit masked in
+      // guest byte order by kEndians.
+      auto expected = [&](uint32_t transform, uint32_t i) -> uint32_t {
+        if (transform == 0) {
+          return reinterpret_cast<const uint16_t*>(guest)[i];
+        }
+        const uint32_t index = reinterpret_cast<const uint32_t*>(guest)[i];
+        if (transform <= 4) {
+          return xenos::GpuSwap(index, kEndians[transform - 1]) & 0x00FFFFFF;
+        }
+        return index & xenos::GpuSwap(uint32_t(0x00FFFFFF), kEndians[transform - 5]);
+      };
+      const uint32_t reset_value = host_16 ? UINT16_MAX : UINT32_MAX;
+      uint32_t best_differing = UINT32_MAX, best_first = 0, best_transform = 0;
+      for (uint32_t transform = 0; transform < (host_16 ? 1u : 9u) && best_differing; ++transform) {
+        uint32_t differing = 0, first = UINT32_MAX;
+        for (uint32_t i = 0; i < count; ++i) {
+          const uint32_t value = host_index(i);
+          if (value != reset_value && value != expected(transform, i)) {
+            first = std::min(first, i);
+            ++differing;
+          }
+        }
+        if (differing < best_differing) {
+          best_differing = differing;
+          best_first = first;
+          best_transform = transform;
+        }
+      }
+      ++stats.converted_checked;
+      if (best_differing) {
+        ++stats.converted_differ;
+        if (stats.logged < 200) {
+          ++stats.logged;
+          REXGPU_WARN(
+              "Fetch verify: draw {} VS {:016X} PS {:016X} converted indices {:08X} x{} ({}-bit): "
+              "{} differ from #{} (host {:08X}, guest as transform {}: {:08X})",
+              draw, vertex_shader_hash, pixel_shader_hash, primitive.guest_index_base, count,
+              host_16 ? 16 : 32, best_differing, best_first, host_index(best_first),
+              best_transform, expected(best_transform, best_first));
+        }
+      }
+    } else {
+      ++stats.unchecked_indices;
+    }
+  }
+  if (fetch_verify_list_.is_open()) {
+    std::string line = fmt::format(
+        "frame {} draw {} VS {:016X} PS {:016X} prim {} indices {} type {} base {:08X}",
+        presented_output_frames_, draw, vertex_shader_hash, pixel_shader_hash,
+        uint32_t(primitive.guest_primitive_type), primitive.host_draw_vertex_count,
+        uint32_t(primitive.index_buffer_type), primitive.guest_index_base);
+    for (const Wanted& w : wanted) {
+      const auto [valid_pages, gpu_written_pages] = shared_memory_->CountValidPages(w.address, w.size);
+      const uint32_t pages =
+          w.size ? ((w.address + w.size - 1) >> 12) - (w.address >> 12) + 1 : 0;
+      line += fmt::format("; {} {:08X}+{} {}/{}{}",
+                          w.fetch < 0 ? std::string("ib") : fmt::format("vf{}", w.fetch),
+                          w.address, w.size, valid_pages, pages,
+                          gpu_written_pages ? fmt::format(" gpu {}", gpu_written_pages) : "");
+    }
+    fetch_verify_list_ << line << '\n';
+  }
+
+  if (fetch_verify_submissions_.empty() ||
+      fetch_verify_submissions_.back().submission != GetCurrentSubmission()) {
+    fetch_verify_submissions_.emplace_back().submission = GetCurrentSubmission();
+  }
+  FetchVerifySubmission& pending = fetch_verify_submissions_.back();
+  constexpr VkDeviceSize kChunkSize = VkDeviceSize(32) << 20;
+  constexpr VkDeviceSize kSubmissionBudget = VkDeviceSize(256) << 20;
+  const ui::vulkan::VulkanDevice* const vulkan_device = GetVulkanDevice();
+  const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
+  const VkDevice device = vulkan_device->device();
+  bool copying = false;
+  for (const Wanted& w : wanted) {
+    if (!w.size || w.address >= SharedMemory::kBufferSize ||
+        SharedMemory::kBufferSize - w.address < w.size) {
+      continue;
+    }
+    const uint8_t* const guest = memory_->TranslatePhysical<const uint8_t*>(w.address);
+    const uint64_t hash = XXH3_64bits(guest, w.size);
+    const auto [queued, inserted] =
+        pending.queued.try_emplace(uint64_t(w.address) << 32 | w.size, hash);
+    if (!inserted && queued->second == hash) {
+      continue;
+    }
+    queued->second = hash;
+    if (pending.bytes + w.size > kSubmissionBudget) {
+      ++stats.over_budget;
+      continue;
+    }
+    if (pending.chunks.empty() ||
+        pending.chunks.back().size - pending.chunks.back().used < w.size) {
+      FetchVerifyChunk chunk;
+      chunk.size = std::max(kChunkSize, VkDeviceSize(w.size));
+      if (!ui::vulkan::util::CreateDedicatedAllocationBuffer(
+              vulkan_device, chunk.size, VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+              ui::vulkan::util::MemoryPurpose::kReadback, chunk.buffer, chunk.memory,
+              &chunk.memory_type, &chunk.memory_size)) {
+        ++stats.over_budget;
+        continue;
+      }
+      if (dfn.vkMapMemory(device, chunk.memory, 0, VK_WHOLE_SIZE, 0, &chunk.mapping) !=
+          VK_SUCCESS) {
+        dfn.vkDestroyBuffer(device, chunk.buffer, nullptr);
+        dfn.vkFreeMemory(device, chunk.memory, nullptr);
+        ++stats.over_budget;
+        continue;
+      }
+      pending.chunks.push_back(chunk);
+    }
+    FetchVerifyChunk& chunk = pending.chunks.back();
+    if (!copying) {
+      shared_memory_->Use(VulkanSharedMemory::Usage::kRead);
+      SubmitBarriers(true);
+      copying = true;
+    }
+    VkBufferCopy region = {};
+    region.srcOffset = w.address;
+    region.dstOffset = chunk.used;
+    region.size = w.size;
+    deferred_command_buffer_.CmdVkCopyBuffer(shared_memory_->buffer(), chunk.buffer, 1, &region);
+    PushBufferMemoryBarrier(chunk.buffer, chunk.used, w.size, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                            VK_PIPELINE_STAGE_HOST_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
+                            VK_ACCESS_HOST_READ_BIT);
+    const auto [valid_pages, gpu_written_pages] = shared_memory_->CountValidPages(w.address, w.size);
+    FetchVerifyRange& range = pending.ranges.emplace_back();
+    range.draw = draw;
+    range.vertex_shader = vertex_shader_hash;
+    range.pixel_shader = pixel_shader_hash;
+    range.fetch = w.fetch;
+    range.address = w.address;
+    range.size = w.size;
+    range.pages = ((w.address + w.size - 1) >> 12) - (w.address >> 12) + 1;
+    range.valid_pages = valid_pages;
+    range.gpu_written_pages = gpu_written_pages;
+    range.chunk = uint32_t(pending.chunks.size() - 1);
+    range.offset = chunk.used;
+    range.guest.assign(guest, guest + w.size);
+    chunk.used += w.size;
+    pending.bytes += w.size;
+    ++stats.ranges;
+    stats.bytes += w.size;
+    if (valid_pages < range.pages) {
+      ++stats.stale;
+    }
+  }
+}
+
+void VulkanCommandProcessor::VerifyDrawFetchesCompleted() {
+  const ui::vulkan::VulkanDevice* const vulkan_device = GetVulkanDevice();
+  const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
+  const VkDevice device = vulkan_device->device();
+  FetchVerifyStats& stats = fetch_verify_stats_;
+  while (!fetch_verify_submissions_.empty() &&
+         fetch_verify_submissions_.front().submission <= submission_completed_) {
+    FetchVerifySubmission& done = fetch_verify_submissions_.front();
+    for (const FetchVerifyChunk& chunk : done.chunks) {
+      if (!(vulkan_device->memory_types().host_coherent & (uint32_t(1) << chunk.memory_type))) {
+        VkMappedMemoryRange mapped = {};
+        mapped.sType = VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE;
+        mapped.memory = chunk.memory;
+        mapped.size = VK_WHOLE_SIZE;
+        dfn.vkInvalidateMappedMemoryRanges(device, 1, &mapped);
+      }
+    }
+    for (const FetchVerifyRange& range : done.ranges) {
+      const uint8_t* const gpu =
+          static_cast<const uint8_t*>(done.chunks[range.chunk].mapping) + range.offset;
+      if (!std::memcmp(gpu, range.guest.data(), range.size)) {
+        continue;
+      }
+      ++stats.differ;
+      if (stats.logged >= 200) {
+        continue;
+      }
+      ++stats.logged;
+      uint32_t first = UINT32_MAX, differing = 0;
+      for (uint32_t i = 0; i < range.size; ++i) {
+        if (gpu[i] != range.guest[i]) {
+          first = std::min(first, i);
+          ++differing;
+        }
+      }
+      std::string guest_bytes, gpu_bytes;
+      for (uint32_t i = first; i < std::min(range.size, first + 16); ++i) {
+        guest_bytes += fmt::format("{:02X}", range.guest[i]);
+        gpu_bytes += fmt::format("{:02X}", gpu[i]);
+      }
+      const bool changed_since =
+          std::memcmp(memory_->TranslatePhysical<const uint8_t*>(range.address),
+                      range.guest.data(), range.size) != 0;
+      REXGPU_WARN(
+          "Fetch verify: draw {} VS {:016X} PS {:016X} {} {:08X}+{}: {} bytes differ from +{:X} "
+          "(guest {} GPU {}); pages {}/{} valid, {} GPU-written; guest {} since",
+          range.draw, range.vertex_shader, range.pixel_shader,
+          range.fetch < 0 ? std::string("indices") : fmt::format("vfetch {}", range.fetch),
+          range.address, range.size, differing, first, guest_bytes, gpu_bytes, range.valid_pages,
+          range.pages, range.gpu_written_pages, changed_since ? "changed" : "unchanged");
+    }
+    for (FetchVerifyChunk& chunk : done.chunks) {
+      dfn.vkUnmapMemory(device, chunk.memory);
+      dfn.vkDestroyBuffer(device, chunk.buffer, nullptr);
+      dfn.vkFreeMemory(device, chunk.memory, nullptr);
+    }
+    fetch_verify_submissions_.pop_front();
+  }
+  if (fetch_verify_summary_due_ && fetch_verify_submissions_.empty()) {
+    fetch_verify_summary_due_ = false;
+    REXGPU_INFO(
+        "Fetch verify: window ended, {} draws, {} ranges ({} MB) compared, {} differ, {} with "
+        "pages the CPU wrote after their upload; converted index buffers {} compared, {} "
+        "differ; not compared: indices of {} draws (other conversions), {} ranges (over budget)",
+        stats.draws, stats.ranges, stats.bytes >> 20, stats.differ, stats.stale,
+        stats.converted_checked, stats.converted_differ, stats.unchecked_indices,
+        stats.over_budget);
+  }
+}
+
+void VulkanCommandProcessor::DestroyFetchVerifyChunks() {
+  const ui::vulkan::VulkanDevice* const vulkan_device = GetVulkanDevice();
+  const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
+  const VkDevice device = vulkan_device->device();
+  for (FetchVerifySubmission& pending : fetch_verify_submissions_) {
+    for (FetchVerifyChunk& chunk : pending.chunks) {
+      dfn.vkUnmapMemory(device, chunk.memory);
+      dfn.vkDestroyBuffer(device, chunk.buffer, nullptr);
+      dfn.vkFreeMemory(device, chunk.memory, nullptr);
+    }
+  }
+  fetch_verify_submissions_.clear();
 }
 
 bool VulkanCommandProcessor::IssueDraw_MemexportReadbackFastPath(uint32_t total_size) {
@@ -8692,6 +9022,8 @@ void VulkanCommandProcessor::CheckSubmissionFenceAndDeviceLoss(uint64_t await_su
 
   shared_memory_->CompletedSubmissionUpdated();
 
+  VerifyDrawFetchesCompleted();
+
   primitive_processor_->CompletedSubmissionUpdated();
 
   render_target_cache_->CompletedSubmissionUpdated();
@@ -8790,6 +9122,7 @@ bool VulkanCommandProcessor::BeginSubmission(bool is_guest_command) {
     // the end of the submission (when async pipeline object creation requests
     // are fulfilled).
     deferred_command_buffer_.Reset();
+    Checkpoint(CheckpointKind::kSubmission, uint32_t(GetCurrentSubmission()), "start");
 
     // Reset cached state of the command buffer.
     dynamic_viewport_update_needed_ = true;
@@ -9122,7 +9455,6 @@ bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
       const bool flush_textures =
           std::filesystem::remove(dump_dir / "flush_textures", error) || flush_memory;
       if (flush_textures && AwaitAllQueueOperationsCompletion()) {
-    Checkpoint(CheckpointKind::kSubmission, uint32_t(GetCurrentSubmission()), "start");
         if (flush_memory) {
           shared_memory_->SetSystemPageBlocksValidWithGpuDataWritten();
         }

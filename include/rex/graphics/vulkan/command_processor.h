@@ -17,6 +17,7 @@
 #include <condition_variable>
 #include <deque>
 #include <filesystem>
+#include <fstream>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -286,8 +287,8 @@ class VulkanCommandProcessor : public CommandProcessor {
     // Recorded on the CPU only, without a marker in the command stream.
     kNote,
     kCompute,
-  };
     kSubmission,
+  };
   // Without a value, the current draw index in the frame. Inline so that with
   // the option off a call costs one branch and builds no string.
   void Checkpoint(CheckpointKind kind, uint32_t value = UINT32_MAX, std::string_view detail = {}) {
@@ -813,6 +814,11 @@ class VulkanCommandProcessor : public CommandProcessor {
   bool IssueCopy_ReadbackResolvePath();
   bool IssueDraw_MemexportReadbackFullPath(uint32_t total_size);
   bool IssueDraw_MemexportReadbackFastPath(uint32_t total_size);
+  void VerifyDrawFetches(const Shader::ConstantRegisterMap& vertex_constants,
+                         uint64_t vertex_shader_hash, uint64_t pixel_shader_hash,
+                         const PrimitiveProcessor::ProcessingResult& primitive);
+  void VerifyDrawFetchesCompleted();
+  void DestroyFetchVerifyChunks();
 
   void SplitPendingBarrier();
 
@@ -1390,6 +1396,56 @@ class VulkanCommandProcessor : public CommandProcessor {
   };
   std::array<VertexBufferState, 96> vertex_buffer_states_{};
   uint64_t vertex_buffers_in_sync_[2] = {};
+  // vulkan_verify_draw_fetches: the shared memory ranges a draw fetches,
+  // copied back at the draw, and guest memory at record time.
+  struct FetchVerifyChunk {
+    VkBuffer buffer = VK_NULL_HANDLE;
+    VkDeviceMemory memory = VK_NULL_HANDLE;
+    uint32_t memory_type = UINT32_MAX;
+    VkDeviceSize memory_size = 0;
+    VkDeviceSize size = 0;
+    VkDeviceSize used = 0;
+    void* mapping = nullptr;
+  };
+  struct FetchVerifyRange {
+    uint64_t draw;
+    uint64_t vertex_shader;
+    uint64_t pixel_shader;
+    int32_t fetch;  // -1: the indices
+    uint32_t address;
+    uint32_t size;
+    uint32_t pages;
+    uint32_t valid_pages;
+    uint32_t gpu_written_pages;
+    uint32_t chunk;
+    VkDeviceSize offset;
+    std::vector<uint8_t> guest;
+  };
+  struct FetchVerifySubmission {
+    uint64_t submission = 0;
+    std::vector<FetchVerifyChunk> chunks;
+    std::vector<FetchVerifyRange> ranges;
+    std::unordered_map<uint64_t, uint64_t> queued;  // address << 32 | size -> guest hash
+    VkDeviceSize bytes = 0;
+  };
+  struct FetchVerifyStats {
+    uint64_t draws = 0;
+    uint64_t ranges = 0;
+    uint64_t bytes = 0;
+    uint64_t differ = 0;
+    uint64_t stale = 0;
+    uint64_t converted_checked = 0;
+    uint64_t converted_differ = 0;
+    uint64_t unchecked_indices = 0;
+    uint64_t over_budget = 0;
+    uint64_t logged = 0;
+  };
+  std::deque<FetchVerifySubmission> fetch_verify_submissions_;
+  FetchVerifyStats fetch_verify_stats_;
+  bool fetch_verify_window_ = false;
+  bool fetch_verify_summary_due_ = false;
+  uint32_t fetch_verify_windows_ = 0;
+  std::ofstream fetch_verify_list_;
   std::unordered_map<uint64_t, ReadbackBuffer> readback_buffers_;
   std::unordered_map<uint64_t, ReadbackBuffer> memexport_readback_buffers_;
 

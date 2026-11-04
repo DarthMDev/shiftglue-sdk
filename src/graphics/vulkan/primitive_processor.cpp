@@ -82,6 +82,7 @@ void VulkanPrimitiveProcessor::Shutdown(bool from_destructor) {
   const VkDevice device = vulkan_device->device();
 
   frame_index_buffers_.clear();
+  frame_index_mappings_.clear();
   frame_index_buffer_pool_.reset();
   ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroyBuffer, device, builtin_index_buffer_upload_);
   ui::vulkan::util::DestroyAndNullHandle(dfn.vkFreeMemory, device,
@@ -143,6 +144,7 @@ void VulkanPrimitiveProcessor::EndSubmission() {
 void VulkanPrimitiveProcessor::EndFrame() {
   ClearPerFrameCache();
   frame_index_buffers_.clear();
+  frame_index_mappings_.clear();
 }
 
 bool VulkanPrimitiveProcessor::InitializeBuiltinIndexBuffer(
@@ -228,6 +230,7 @@ void* VulkanPrimitiveProcessor::RequestHostConvertedIndexBufferForCurrentFrame(
   }
   backend_handle_out = frame_index_buffers_.size();
   frame_index_buffers_.emplace_back(buffer, offset);
+  frame_index_mappings_.push_back(mapping);
   return mapping;
 }
 
