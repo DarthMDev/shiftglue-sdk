@@ -47,8 +47,8 @@ REXCVAR_DEFINE_STRING(pad_chord_game_menu, "BACK+START", "Input",
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
 REXCVAR_DEFINE_INT32(pad_rumble_strength, 100, "Input",
                      "Controller rumble strength in percent of what the title asks for (0 turns "
-                     "it off)")
-    .range(0, 100)
+                     "it off; above 100 each motor is capped at full speed)")
+    .range(0, 200)
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
 REXCVAR_DEFINE_BOOL(pad_log_vibration, false, "Input",
                     "Log every change of the title's two rumble motor values (the motor census "
@@ -582,12 +582,13 @@ X_RESULT InputSystem::SetState(uint32_t user_index, X_INPUT_VIBRATION* vibration
     last = *vibration;
   }
   if (vibration) {
-    const int32_t strength = std::clamp(REXCVAR_GET(pad_rumble_strength), 0, 100);
+    const uint32_t strength = uint32_t(std::clamp(REXCVAR_GET(pad_rumble_strength), 0, 200));
+    const auto scale = [strength](uint16_t speed) {
+      return uint16_t(std::min<uint32_t>(speed * strength / 100, 0xFFFF));
+    };
     scaled = *vibration;
-    scaled.left_motor_speed = uint16_t(uint32_t(uint16_t(vibration->left_motor_speed)) *
-                                       uint32_t(strength) / 100);
-    scaled.right_motor_speed = uint16_t(uint32_t(uint16_t(vibration->right_motor_speed)) *
-                                        uint32_t(strength) / 100);
+    scaled.left_motor_speed = scale(uint16_t(vibration->left_motor_speed));
+    scaled.right_motor_speed = scale(uint16_t(vibration->right_motor_speed));
     vibration = &scaled;
   }
   for (DeviceId id : ids) {
