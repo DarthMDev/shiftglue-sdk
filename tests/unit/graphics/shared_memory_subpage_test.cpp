@@ -96,6 +96,15 @@ TEST_CASE("CPU writes to neighboring guest pages survive host-page unprotection"
           "both guest pages of the bulk store are invalidated");
     shared.InvalidateAllPages();
     Check(!shared.CheckUnprotectedGpuPages(), "cache invalidation retires snapshots");
+
+    // Hidden writes detected during RequestRanges remain latched until
+    // consumed by IssueDraw resetting vertex buffer residency.
+    shared.RangeWrittenByGpu(physical, 16384);
+    *reinterpret_cast<volatile uint32_t*>(cpu) = 1;
+    *reinterpret_cast<volatile uint32_t*>(cpu + 4096) = 42;
+    Check(shared.RequestRange(physical, 4096), "request range detects hidden write");
+    Check(shared.CheckUnprotectedGpuPages(), "latched change is consumed by IssueDraw");
+    Check(!shared.CheckUnprotectedGpuPages(), "latched change does not repeat after being consumed");
   }
   heap->Release(address, nullptr);
 }

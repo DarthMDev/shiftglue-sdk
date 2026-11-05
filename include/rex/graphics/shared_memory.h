@@ -40,7 +40,8 @@ class SharedMemory {
   void InvalidateAllPages();
   // Detect stores to GPU-owned guest pages sharing an unprotected host page.
   // Returns whether cached bindings may need to request their memory again.
-  bool CheckUnprotectedGpuPages();
+  // If consume is true, resets the latched change flag (e.g. for IssueDraw).
+  bool CheckUnprotectedGpuPages(bool consume = true);
 
   typedef void (*GlobalWatchCallback)(const std::unique_lock<std::recursive_mutex>& global_lock,
                                       void* context, uint32_t address_first, uint32_t address_last,
@@ -253,6 +254,7 @@ class SharedMemory {
   // that cannot fault. Snapshots contain CPU bytes, not GPU resolve contents.
   std::unordered_map<uint32_t, std::array<uint8_t, 4096>> unprotected_gpu_pages_;
   std::atomic<bool> unprotected_gpu_pages_pending_{false};
+  std::atomic<bool> unprotected_gpu_pages_changed_{false};
 
   static std::pair<uint32_t, uint32_t> MemoryInvalidationCallbackThunk(
       void* context_ptr, uint32_t physical_address_start, uint32_t length, bool exact_range);

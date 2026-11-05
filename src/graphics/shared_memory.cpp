@@ -123,42 +123,52 @@ void SharedMemory::ShutdownCommon() {
   num_system_page_flags_ = 0;
 }
 
-bool SharedMemory::CheckUnprotectedGpuPages() {
-  if (!unprotected_gpu_pages_pending_.load(std::memory_order_acquire)) return false;
+bool SharedMemory::CheckUnprotectedGpuPages(bool consume) {
+  if (!unprotected_gpu_pages_pending_.load(std::memory_order_acquire) &&
+      !unprotected_gpu_pages_changed_.load(std::memory_order_acquire)) {
+    return false;
+  }
   auto global_lock = global_critical_region_.Acquire(kSharedMemoryLockSource);
   bool changed = false;
-  for (auto it = unprotected_gpu_pages_.begin(); it != unprotected_gpu_pages_.end();) {
-    const uint32_t page = it->first;
-    const uint64_t bit = uint64_t(1) << (page & 63);
-    const bool gpu_valid = (system_page_flags_valid_and_gpu_written_[page >> 6] & bit) != 0;
-    if (gpu_valid && std::memcmp(it->second.data(),
-                                memory().TranslatePhysical(page << page_size_log2_),
-                                it->second.size()) == 0) {
-      ++it;
-      continue;
+  if (unprotected_gpu_pages_pending_.load(std::memory_order_relaxed)) {
+    for (auto it = unprotected_gpu_pages_.begin(); it != unprotected_gpu_pages_.end();) {
+      const uint32_t page = it->first;
+      const uint64_t bit = uint64_t(1) << (page & 63);
+      const bool gpu_valid = (system_page_flags_valid_and_gpu_written_[page >> 6] & bit) != 0;
+      if (gpu_valid && std::memcmp(it->second.data(),
+                                  memory().TranslatePhysical(page << page_size_log2_),
+                                  it->second.size()) == 0) {
+        ++it;
+        continue;
+      }
+      if (gpu_valid) {
+        system_page_flags_valid_[page >> 6] &= ~bit;
+        system_page_flags_valid_and_gpu_written_[page >> 6] &= ~bit;
+        FireWatches(page, page, false);
+        changed = true;
+      }
+      it = unprotected_gpu_pages_.erase(it);
     }
-    if (gpu_valid) {
-      system_page_flags_valid_[page >> 6] &= ~bit;
-      system_page_flags_valid_and_gpu_written_[page >> 6] &= ~bit;
-      FireWatches(page, page, false);
-      changed = true;
+    unprotected_gpu_pages_pending_.store(!unprotected_gpu_pages_.empty(), std::memory_order_release);
+    if (changed) {
+      unprotected_gpu_pages_changed_.store(true, std::memory_order_release);
+      static std::atomic<bool> reported{false};
+      if (!reported.exchange(true, std::memory_order_relaxed)) {
+        REXGPU_INFO("GPU memory: detected changed CPU bytes in preserved, unprotected guest pages");
+      }
     }
-    it = unprotected_gpu_pages_.erase(it);
   }
-  unprotected_gpu_pages_pending_.store(!unprotected_gpu_pages_.empty(), std::memory_order_release);
-  if (changed) {
-    static std::atomic<bool> reported{false};
-    if (!reported.exchange(true, std::memory_order_relaxed)) {
-      REXGPU_INFO("GPU memory: detected changed CPU bytes in preserved, unprotected guest pages");
-    }
+  if (!consume) {
+    return changed || unprotected_gpu_pages_changed_.load(std::memory_order_relaxed);
   }
-  return changed;
+  return unprotected_gpu_pages_changed_.exchange(false, std::memory_order_acq_rel);
 }
 
 void SharedMemory::InvalidateAllPages() {
   auto global_lock = global_critical_region_.Acquire(kSharedMemoryLockSource);
   unprotected_gpu_pages_.clear();
   unprotected_gpu_pages_pending_.store(false, std::memory_order_release);
+  unprotected_gpu_pages_changed_.store(false, std::memory_order_release);
 
   std::fill(system_page_flags_valid_.begin(), system_page_flags_valid_.end(), uint64_t(0));
   std::fill(system_page_flags_valid_and_gpu_written_.begin(),
@@ -580,7 +590,7 @@ void SharedMemory::UnlinkWatchRange(WatchRange* range) {
 }
 
 bool SharedMemory::RequestRanges(const std::pair<uint32_t, uint32_t>* ranges, size_t count) {
-  CheckUnprotectedGpuPages();
+  CheckUnprotectedGpuPages(false);
   if (ranges == nullptr || !count) {
     return true;
   }
