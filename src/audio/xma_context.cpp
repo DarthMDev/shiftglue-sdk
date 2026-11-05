@@ -9,7 +9,34 @@
 * @modified    Tom Clay, 2026 - Adapted for ReXGlue runtime
 */
 
+// GetFrameTrims and the pass-end crossfade (LoopState, BlendPassEnd) are adapted from the Forza
+// Motorsport 2 ReGPU port, https://github.com/zer0ducksgiven/Forza-Motorsport-2-ReGPU
+// (src/audio/xma_trims.h, src/audio/xma.cpp):
+//
+// MIT License
+//
+// Copyright (c) 2026 zer0ducksgiven
+//
+// Permission is hereby granted, free of charge, to any person obtaining a copy
+// of this software and associated documentation files (the "Software"), to deal
+// in the Software without restriction, including without limitation the rights
+// to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+// copies of the Software, and to permit persons to whom the Software is
+// furnished to do so, subject to the following conditions:
+//
+// The above copyright notice and this permission notice shall be included in all
+// copies or substantial portions of the Software.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+// SOFTWARE.
+
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstring>
 
@@ -54,6 +81,22 @@ REXCVAR_DEFINE_BOOL(xma_direct_decode, true, "Audio",
                     "send-packet/receive-frame queue, which copies and queues each packet "
                     "(NN-4.1)")
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
+REXCVAR_DEFINE_BOOL(xma_stream_start_resets_carry, true, "Audio",
+                    "A frame that declares a start trim begins a stream (a title's restart of a "
+                    "loop or a new sound): drop the realigned tail of the stream before instead "
+                    "of joining it to the new one, as the hardware does")
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+REXCVAR_DEFINE_BOOL(xma_frameless_end_of_stream, true, "Audio",
+                    "End the input when the packets after a stream's last frame start no frame, "
+                    "as the hardware does, instead of flagging error 4 and decoding the current "
+                    "buffer again from its start")
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+REXCVAR_DEFINE_BOOL(xma_loop_end_crossfade, false, "Audio",
+                    "Crossfade the last 384 samples of each pass of a stream into the 384 that FMOD "
+                    "skips when it restarts the stream, so its loops join without the step the "
+                    "hardware's passes leave (they end 128 to 512 samples short of the loop); for "
+                    "titles that loop XMA through FMOD")
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
 
 // Credits for most of this code goes to:
 // https://github.com/koolkdev/libertyv/blob/master/libav_wrapper/xma2dec.c
@@ -64,6 +107,131 @@ using stream::BitStream;
 
 const uint32_t XmaContext::kBitsPerPacketHeader;
 const uint32_t XmaContext::kOutputMaxSizeBytes;
+
+namespace {
+// The trims an XMA frame declares, in samples (0 when absent): only a stream's first frame has a
+// start trim, and only its last frame an end trim. The frame as PreparePacket lays it out: a
+// byte of padding sizes, then the frame from bit 8 + padding. The header walk (frame length,
+// tile header, post-process transform, DRC gain, then the trim fields) follows PacketTrims of
+// the Forza Motorsport 2 ReGPU port (src/audio/xma_trims.h, MIT).
+struct FrameTrims {
+  uint32_t start = 0, end = 0;
+};
+FrameTrims GetFrameTrims(const uint8_t* frame, size_t bytes, bool stereo) {
+  FrameTrims trims;
+  const size_t bits = bytes * 8;
+  size_t pos = 8 + ((frame[0] >> 5) & 7);
+  bool ok = true;
+  const auto get = [&](uint32_t n) {
+    uint32_t v = 0;
+    for (uint32_t i = 0; i < n; i++, pos++) {
+      if (pos >= bits) {
+        ok = false;
+        return 0u;
+      }
+      v = v << 1 | ((frame[pos >> 3] >> (7 - (pos & 7))) & 1);
+    }
+    return v;
+  };
+  const uint32_t length = get(15);
+  if (!ok || length == 0 || length == 0x7FFF) {
+    return trims;
+  }
+  const uint32_t nb = stereo ? 2 : 1;
+  uint32_t samples[2] = {}, contains[2] = {}, for_cur = nb;
+  int min_len = 0;
+  const bool fixed = get(1) != 0;
+  for (int guard = 0; ok && min_len < 512 && guard < 64; guard++) {
+    for (uint32_t c = 0; c < nb; c++) {
+      contains[c] = int(samples[c]) == min_len
+                        ? (fixed || for_cur == 1 || min_len == 512 - 128 ? 1 : get(1))
+                        : 0;
+    }
+    int sub;
+    if (min_len == 512 - 128) {
+      sub = 128;
+    } else {
+      sub = get(1) ? 512 >> (1 + get(1)) : 512;
+    }
+    min_len += sub;
+    for (uint32_t c = 0; c < nb; c++) {
+      if (contains[c]) {
+        samples[c] += uint32_t(sub);
+      } else if (int(samples[c]) <= min_len) {
+        if (int(samples[c]) < min_len) {
+          for_cur = 0;
+          min_len = int(samples[c]);
+        }
+        for_cur++;
+      }
+    }
+  }
+  if (nb > 1 && get(1) && get(1)) {
+    pos += nb * nb * 4;
+  }
+  get(8);  // DRC gain
+  if (!ok || !get(1)) {
+    return trims;
+  }
+  if (get(1)) {
+    const uint32_t v = get(10);
+    if (ok) trims.start = v;
+  }
+  if (ok && get(1)) {
+    const uint32_t v = get(10);
+    if (ok) trims.end = v;
+  }
+  return trims;
+}
+
+// The joins of a looping stream. FMOD loops a sound it streams packet by packet by playing what
+// the decoder delivers until the output is empty and the input has run out, then seeking to its
+// start, which feeds the first packet again and skips the first 384 samples that come out (its
+// XMA codec's setPosition). The hardware delivers frames * 512 - 512 samples per pass (trim_start
+// dropped, trim_end kept), 512 - trim_end short of where the loop's L samples end, so each join
+// jumps: the stepping heard on a console too. As in the Forza Motorsport 2 ReGPU port
+// (src/audio/xma.cpp, MIT), the last 384 samples of each pass crossfade into the 384 samples FMOD
+// skips after the restart, the stream's lead-in, which runs on into the loop's start. The pass's
+// last frame is the one with an end trim or, for a stream without one, the last frame of a packet
+// after which no frame starts in what the title has fed: FMOD fills both input buffers before each
+// decode while it has packets left, so only the stream's end has nothing behind it. That holds
+// however FMOD reached the end, from the start or after it seeked into the stream's middle.
+struct LoopState {
+  uint64_t first_hash = 0;  // the stream's first packet
+  uint32_t frames = 0;      // frames decoded since the stream's first frame
+  bool head_valid = false;  // the lead-in of the stream's latest pass
+  std::array<uint8_t, XmaContext::kBytesPerFrameChannel * 2> head{};
+};
+std::array<LoopState, 320> g_loop_state;
+
+uint64_t PacketHash(const uint8_t* p) {
+  uint64_t h = 0xCBF29CE484222325ull;
+  for (uint32_t i = 0; i < XmaContext::kBytesPerPacket; i++) h = (h ^ p[i]) * 0x100000001B3ull;
+  return h;
+}
+
+// Crossfades the end of `block`, a pass's last output block (512 samples, interleaved big-endian
+// 16-bit), into the lead-in, the first 384 samples of the pass's first block.
+void BlendPassEnd(uint8_t* block, const uint8_t* lead_in, bool stereo) {
+  constexpr uint32_t kSamples = 512, kSkipped = 384;
+  const uint32_t ch = stereo ? 2 : 1;
+  const auto get = [](const uint8_t* p, uint32_t i) {
+    return int32_t(int16_t(uint16_t(uint16_t(p[2 * i]) << 8 | p[2 * i + 1])));
+  };
+  const auto put = [](uint8_t* p, uint32_t i, double v) {
+    const int32_t sample = int32_t(std::lround(std::clamp(v, -32768.0, 32767.0)));
+    p[2 * i] = uint8_t(uint32_t(sample) >> 8);
+    p[2 * i + 1] = uint8_t(sample);
+  };
+  for (uint32_t i = 0; i < kSkipped; i++) {
+    const double w = 0.5 - 0.5 * std::cos(3.14159265358979323846 * (i + 0.5) / kSkipped);
+    for (uint32_t c = 0; c < ch; c++) {
+      const uint32_t at = (kSamples - kSkipped + i) * ch + c, from = i * ch + c;
+      put(block, at, get(block, at) * (1.0 - w) + get(lead_in, from) * w);
+    }
+  }
+}
+}  // namespace
 
 bool XmaStallTracker::ShouldLogSummary(uint64_t total_count) {
   return total_count == 1 || total_count == 8 || total_count == 64 ||
@@ -991,6 +1159,47 @@ bool XmaContext::DecodePacket(AVCodecContext* av_context, const AVPacket* av_pac
 void XmaContext::Decode(XMA_CONTEXT_DATA* data) {
   SCOPE_profile_cpu_f("apu");
 
+  // No packet after the last frame starts a frame (it only holds the end of the frame before):
+  // the stream ends there. The hardware consumes those packets and the input runs out, as
+  // xenia-canary retires that buffer too. Retires the current buffer and a frame-less alternate.
+  const auto end_of_frames = [&](const XmaPacketHandle& next) {
+    if (!REXCVAR_GET(xma_frameless_end_of_stream) ||
+        next.status != XmaPacketStatus::kPacketOutOfRange) {
+      return false;
+    }
+    SwapInputBuffer(data);
+    if (data->IsCurrentInputBufferValid()) {
+      const uint8_t buffer_index = data->current_buffer;
+      uint8_t* buffer = memory()->TranslatePhysical(data->GetInputBufferAddress(buffer_index));
+      bool frame_start = false;
+      for (uint32_t i = 0; i < data->GetInputBufferPacketCount(buffer_index) && !frame_start; i++) {
+        frame_start = xma::GetPacketFrameOffset(buffer + i * kBytesPerPacket) <= kMaxFrameSizeinBits;
+      }
+      if (!frame_start) {
+        SwapInputBuffer(data);
+      }
+    }
+    return true;
+  };
+
+  // Whether a frame starts in the packets the title has fed after this one: in the rest of the
+  // current buffer from `next_index`, or in the other buffer.
+  const auto frame_follows = [&](uint32_t next_index) {
+    const auto frame_starts = [&](uint8_t buffer_index, uint32_t from) {
+      const uint8_t* buffer =
+          memory()->TranslatePhysical(data->GetInputBufferAddress(buffer_index));
+      for (uint32_t i = from; i < data->GetInputBufferPacketCount(buffer_index); i++) {
+        if (xma::GetPacketFrameOffset(buffer + i * kBytesPerPacket) <= kMaxFrameSizeinBits) {
+          return true;
+        }
+      }
+      return false;
+    };
+    const uint8_t other = data->current_buffer ^ 1;
+    return frame_starts(data->current_buffer, next_index) ||
+           (data->IsInputBufferValid(other) && frame_starts(other, 0));
+  };
+
   if (!data->IsAnyInputBufferValid()) {
     return;
   }
@@ -1078,7 +1287,7 @@ void XmaContext::Decode(XMA_CONTEXT_DATA* data) {
     } else if (!next_packet.valid()) {
       if (next_packet.status == XmaPacketStatus::kBufferInvalid) {
         SwapInputBuffer(data);
-      } else {
+      } else if (!end_of_frames(next_packet)) {
         data->error_status = 4;
       }
     }
@@ -1154,6 +1363,28 @@ void XmaContext::Decode(XMA_CONTEXT_DATA* data) {
     carry_valid_ = false;
   }
   PreparePacket(packet_info.current_frame_size_, padding_start);
+  const FrameTrims trims =
+      GetFrameTrims(xma_frame_.data(), size_t(av_packet_->size), bool(data->is_stereo));
+  LoopState* const loop = id() < g_loop_state.size() ? &g_loop_state[id()] : nullptr;
+  if (trims.start > 0) {
+    // A stream's first frame: the carried tail belongs to the stream before (the hardware drops
+    // what it holds at a stream start), so this frame primes the realignment afresh.
+    if (REXCVAR_GET(xma_stream_start_resets_carry) && carry_valid_) {
+      carry_valid_ = false;
+      pending_output_limit_ = 0;
+      pending_start_skip_ = 0;
+    }
+    if (loop) {
+      const uint64_t hash = PacketHash(packet);
+      // The same stream again keeps its lead-in; another stream brings its own.
+      const bool restart = loop->frames > 0 && hash == loop->first_hash;
+      if (!restart) {
+        loop->head_valid = false;
+      }
+      loop->first_hash = hash;
+      loop->frames = 0;
+    }
+  }
   const bool decoded = DecodePacket(av_context_, av_packet_, av_frame_);
   if (decoded) {
     ConvertFrame(reinterpret_cast<const uint8_t**>(&av_frame_->data), bool(data->is_stereo),
@@ -1191,6 +1422,23 @@ void XmaContext::Decode(XMA_CONTEXT_DATA* data) {
     carry_valid_ = true;
     pending_output_limit_ = decoded_output_limit;
     pending_start_skip_ = decoded_start_skip;
+
+    // See LoopState: the pass's first output block holds its lead-in; at its last frame, the
+    // block just realigned is the last the pass delivers.
+    if (loop) {
+      loop->frames++;
+      if (loop->frames == 2 && current_frame_remaining_subframes_ > 0 &&
+          loop_frame_output_limit_ == 0) {
+        std::memcpy(loop->head.data(), raw_frame_.data(), kBytesPerFrameChannel << data->is_stereo);
+        loop->head_valid = true;
+      } else if (REXCVAR_GET(xma_loop_end_crossfade) && loop->head_valid && loop->frames > 2 &&
+                 current_frame_remaining_subframes_ == (4 << data->is_stereo) &&
+                 loop_frame_output_limit_ == 0 &&
+                 (trims.end > 0 || (data->loop_count == 0 && packet_info.isLastFrameInPacket() &&
+                                    !frame_follows(next_packet_index)))) {
+        BlendPassEnd(raw_frame_.data(), loop->head.data(), bool(data->is_stereo));
+      }
+    }
   } else {
     // A dropped frame breaks the carry's adjacency; re-prime rather than splice
     // two blocks that are not neighbors.
@@ -1219,7 +1467,7 @@ void XmaContext::Decode(XMA_CONTEXT_DATA* data) {
   } else if (!next_packet.valid()) {
     if (next_packet.status == XmaPacketStatus::kBufferInvalid) {
       SwapInputBuffer(data);
-    } else {
+    } else if (!end_of_frames(next_packet)) {
       data->error_status = 4;
     }
   }
