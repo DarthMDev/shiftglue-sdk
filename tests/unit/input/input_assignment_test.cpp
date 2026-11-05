@@ -5,6 +5,7 @@
 #include <memory>
 #include <vector>
 
+#include <rex/cvar.h>
 #include <rex/input/device_assignment.h>
 #include <rex/input/input_system.h>
 
@@ -94,9 +95,16 @@ class FakeDriver final : public InputDriver {
     return X_ERROR_SUCCESS;
   }
 
-  X_RESULT SetDeviceVibration(DeviceId id, X_INPUT_VIBRATION*) override {
+  X_RESULT SetDeviceVibration(DeviceId id, X_INPUT_VIBRATION* vibration) override {
+    if (vibration) {
+      last_left = vibration->left_motor_speed;
+      last_right = vibration->right_motor_speed;
+    }
     return states_.count(id) ? X_ERROR_SUCCESS : X_ERROR_DEVICE_NOT_CONNECTED;
   }
+
+  uint16_t last_left = 0;
+  uint16_t last_right = 0;
 
   X_RESULT GetDeviceKeystroke(DeviceId id, uint32_t, X_INPUT_KEYSTROKE* out) override {
     if (states_.find(id) == states_.end()) {
@@ -172,6 +180,27 @@ TEST_CASE("Unplugging one controller leaves the other working", "[input]") {
   driver->SetButtons(2, X_INPUT_GAMEPAD_B);
   REQUIRE(system->GetState(0, &state) == X_ERROR_SUCCESS);
   REQUIRE(static_cast<uint16_t>(state.gamepad.buttons) == X_INPUT_GAMEPAD_B);
+}
+
+TEST_CASE("Rumble strength above 100 raises the title's motor values up to full speed", "[input]") {
+  FakeDriver* driver = nullptr;
+  auto system = SharedSystem(&driver);
+  driver->Add(1);
+  REQUIRE(rex::cvar::SetFlagByName("pad_rumble_strength", "200"));
+
+  X_INPUT_VIBRATION vibration = {};
+  vibration.left_motor_speed = 4915;
+  vibration.right_motor_speed = 40000;
+  REQUIRE(system->SetState(0, &vibration) == X_ERROR_SUCCESS);
+  CHECK(driver->last_left == 9830);
+  CHECK(driver->last_right == 65535);
+
+  REQUIRE(rex::cvar::SetFlagByName("pad_rumble_strength", "50"));
+  REQUIRE(system->SetState(0, &vibration) == X_ERROR_SUCCESS);
+  CHECK(driver->last_left == 2457);
+  CHECK(driver->last_right == 20000);
+
+  rex::cvar::SetFlagByName("pad_rumble_strength", "100");
 }
 
 TEST_CASE("Capabilities follow the controller in hand", "[input]") {

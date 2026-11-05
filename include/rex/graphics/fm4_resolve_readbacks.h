@@ -20,6 +20,10 @@ class Fm4ResolveReadbacks {
  public:
   static constexpr uint64_t kRunGapFrames = 4, kRunReadbackFrames = 2, kIdleFrames = 300,
                             kNewFrames = 120;
+  // A run's frames read back while held: a run that holds content past its first frames is
+  // at most a burst (runs measured 1-5 frames at 30-240 fps), kRunGapFrames and another
+  // burst, whatever the load time or frame rate; 16 leaves a margin over that.
+  static constexpr uint64_t kHeldRunReadbackFrames = 16;
   // Runs a range needs since it was new before a later idle gap counts as a pause of a
   // capture the game keeps re-rendering (the cars' 16 KB environment captures, every 5-7
   // frames) rather than a one-off (thumbnails, asphalt strips: one run each).
@@ -35,8 +39,11 @@ class Fm4ResolveReadbacks {
     uint64_t new_since_frames = 0;
     uint64_t previous_run_frames = 0;
   };
-  // One resolve to [address, address + length) in `frame` (frames count from 1).
-  Decision Resolve(uint32_t address, uint32_t length, uint64_t frame, bool read_all);
+  // One resolve to [address, address + length) in `frame` (frames count from 1). With
+  // `held`, the first kHeldRunReadbackFrames of every run are read back, not only the first
+  // kRunReadbackFrames of a new range's.
+  Decision Resolve(uint32_t address, uint32_t length, uint64_t frame, bool read_all,
+                   bool held = false);
   // Whether the range's current run began while it was new, so the guest may process it at
   // once and an async readback still waits for it; true for a range never resolved.
   bool IsFirstRun(uint32_t address, uint32_t length) const;

@@ -404,6 +404,12 @@ bool ReXApp::SetupPresentation() {
     X_STATUS status = config_.graphics->SetupPresentation(&app_context());
     if (XFAILED(status)) {
       REXLOG_ERROR("Graphics presentation setup failed: {:08X}", status);
+      rex::ShowSimpleMessageBox(
+          rex::SimpleMessageBoxType::Error,
+          "The game could not start its graphics: no working Vulkan driver was found for your "
+          "graphics card.\n\nInstall the newest driver for your graphics card from its maker's "
+          "website (NVIDIA, AMD or Intel), restart the PC and start the game again.\n\nThe "
+          "details are in the game's log.");
       return false;
     }
   }

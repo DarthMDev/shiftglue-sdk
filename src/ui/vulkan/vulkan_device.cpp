@@ -10,8 +10,11 @@
  */
 
 #include <algorithm>
+#include <atomic>
 #include <cstring>
 #include <deque>
+#include <filesystem>
+#include <fstream>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -22,6 +25,7 @@
 
 #include <rex/assert.h>
 #include <rex/cvar.h>
+#include <rex/filesystem.h>
 #include <rex/logging.h>
 #include <rex/platform.h>
 #include <rex/string.h>
@@ -33,6 +37,13 @@ REXCVAR_DEFINE_BOOL(vulkan_diagnostic_checkpoints, false, "UI/Vulkan",
                     "passes with VK_NV_device_diagnostic_checkpoints and log the last ones the "
                     "GPU reached if the device is lost")
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+REXCVAR_DEFINE_BOOL(vulkan_diagnostic_checkpoints_serialize, false, "UI/Vulkan",
+                    "Diagnostics: with vulkan_diagnostic_checkpoints, the GPU finishes all "
+                    "earlier work before each checkpoint outside a render pass, so a lost "
+                    "device is reported after the work that faulted, not only after how far "
+                    "the command stream got while earlier work still ran (slow)")
+    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+REXCVAR_DECLARE(bool, vulkan_device_address_bindings);
 REXCVAR_DEFINE_BOOL(vulkan_pipeline_statistics, false, "UI/Vulkan",
                     "Diagnostics: log the driver's statistics (instructions, registers, "
                     "spills) for every graphics pipeline, where the driver reports them "
@@ -496,6 +507,13 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
       XE_UI_VULKAN_STRUCT_EXTENSION(EXT_custom_border_color)
       // Required for true null descriptors in bindless texture bindings.
       XE_UI_VULKAN_STRUCT_EXTENSION(EXT_robustness2)
+      // #342, for the lost-device report.
+      XE_UI_VULKAN_STRUCT_EXTENSION(EXT_device_fault)
+      if (REXCVAR_GET(vulkan_device_address_bindings) &&
+          vulkan_instance->tracks_device_address_bindings()) {
+        // #355.
+        XE_UI_VULKAN_STRUCT_EXTENSION(EXT_device_address_binding_report)
+      }
     }
     if (get_physical_device_properties2_supported && REXCVAR_GET(vulkan_pipeline_statistics)) {
       // #270.
@@ -636,6 +654,12 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
   VulkanFeatures<VkPhysicalDeviceFragmentShadingRateFeaturesKHR,
                  VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FRAGMENT_SHADING_RATE_FEATURES_KHR>
       features_KHR_fragment_shading_rate;
+  VulkanFeatures<VkPhysicalDeviceFaultFeaturesEXT,
+                 VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FAULT_FEATURES_EXT>
+      features_EXT_device_fault;
+  VulkanFeatures<VkPhysicalDeviceAddressBindingReportFeaturesEXT,
+                 VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ADDRESS_BINDING_REPORT_FEATURES_EXT>
+      features_EXT_device_address_binding_report;
 
   if (get_physical_device_properties2_supported) {
     if (properties.apiVersion >= VK_MAKE_API_VERSION(0, 1, 2, 0)) {
@@ -701,6 +725,12 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
     }
     if (device->extensions_.ext_KHR_fragment_shading_rate) {
       features_KHR_fragment_shading_rate.Link(supported_features_2, device_create_info);
+    }
+    if (device->extensions_.ext_EXT_device_fault) {
+      features_EXT_device_fault.Link(supported_features_2, device_create_info);
+    }
+    if (device->extensions_.ext_EXT_device_address_binding_report) {
+      features_EXT_device_address_binding_report.Link(supported_features_2, device_create_info);
     }
     ifn.vkGetPhysicalDeviceProperties2(physical_device, &properties_2);
     ifn.vkGetPhysicalDeviceFeatures2(physical_device, &supported_features_2);
@@ -1004,6 +1034,9 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
     }
     // DLSS allocates and takes the addresses of device-address memory.
     features_1_2.enabled.bufferDeviceAddress = features_1_2.supported.bufferDeviceAddress;
+    // FidelityFX creates shaders with 16-bit types on devices that support them.
+    features_1_2.enabled.shaderFloat16 = features_1_2.supported.shaderFloat16;
+    enabled_features.shaderInt16 = supported_features.shaderInt16;
   } else {
     if (ext_1_2_KHR_sampler_mirror_clamp_to_edge) {
       XE_UI_VULKAN_FEATURE_IMPLIED(samplerMirrorClampToEdge)
@@ -1101,6 +1134,15 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
   if (device->extensions_.ext_KHR_fragment_shading_rate) {
     XE_UI_VULKAN_FEATURE_2(features_KHR_fragment_shading_rate, pipelineFragmentShadingRate)
   }
+  if (device->extensions_.ext_EXT_device_fault) {
+    XE_UI_VULKAN_FEATURE_2(features_EXT_device_fault, deviceFault)
+    if (device->extensions_.ext_EXT_device_address_binding_report) {
+      XE_UI_VULKAN_FEATURE_2(features_EXT_device_fault, deviceFaultVendorBinary)
+    }
+  }
+  if (device->extensions_.ext_EXT_device_address_binding_report) {
+    XE_UI_VULKAN_FEATURE_2(features_EXT_device_address_binding_report, reportAddressBinding)
+  }
 
 #undef XE_UI_VULKAN_LIMIT
 #undef XE_UI_VULKAN_ENUM_LIMIT
@@ -1196,6 +1238,9 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
   if (device->extensions_.ext_KHR_fragment_shading_rate) {
 #include <rex/ui/vulkan/functions/device_khr_fragment_shading_rate.inc>
   }
+  if (device->extensions_.ext_EXT_device_fault) {
+#include <rex/ui/vulkan/functions/device_ext_device_fault.inc>
+  }
 #undef XE_UI_VULKAN_FUNCTION_PROMOTED
 
 #undef XE_UI_VULKAN_FUNCTION
@@ -1243,6 +1288,74 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
   }
 
   return device;
+}
+
+void VulkanDevice::LogDeviceFault() const {
+  static std::atomic<bool> logged{false};
+  if (!properties_.deviceFault || !device_lost_.load(std::memory_order_relaxed) ||
+      logged.exchange(true)) {
+    return;
+  }
+  VkDeviceFaultCountsEXT counts = {VK_STRUCTURE_TYPE_DEVICE_FAULT_COUNTS_EXT};
+  VkResult result = functions_.vkGetDeviceFaultInfoEXT(device_, &counts, nullptr);
+  if (result != VK_SUCCESS) {
+    REXLOG_ERROR("Vulkan device fault: no information ({})", int32_t(result));
+    return;
+  }
+  std::vector<VkDeviceFaultAddressInfoEXT> addresses(counts.addressInfoCount);
+  std::vector<VkDeviceFaultVendorInfoEXT> vendor_infos(counts.vendorInfoCount);
+  std::vector<uint8_t> vendor_binary(properties_.deviceFaultVendorBinary ? counts.vendorBinarySize
+                                                                         : 0);
+  counts.vendorBinarySize = vendor_binary.size();
+  VkDeviceFaultInfoEXT info = {VK_STRUCTURE_TYPE_DEVICE_FAULT_INFO_EXT};
+  info.pAddressInfos = addresses.empty() ? nullptr : addresses.data();
+  info.pVendorInfos = vendor_infos.empty() ? nullptr : vendor_infos.data();
+  info.pVendorBinaryData = vendor_binary.empty() ? nullptr : vendor_binary.data();
+  result = functions_.vkGetDeviceFaultInfoEXT(device_, &counts, &info);
+  if (result != VK_SUCCESS && result != VK_INCOMPLETE) {
+    REXLOG_ERROR("Vulkan device fault: no information ({})", int32_t(result));
+    return;
+  }
+  REXLOG_ERROR("Vulkan device fault: {}", info.description);
+  static const char* const kAddressTypes[] = {"none",
+                                              "invalid read",
+                                              "invalid write",
+                                              "invalid execute",
+                                              "unknown instruction pointer",
+                                              "invalid instruction pointer",
+                                              "faulting instruction pointer"};
+  for (uint32_t i = 0; i < counts.addressInfoCount; ++i) {
+    const VkDeviceFaultAddressInfoEXT& address = addresses[i];
+    const uint64_t precision = std::max<uint64_t>(address.addressPrecision, 1);
+    const uint64_t first = address.reportedAddress & ~(precision - 1);
+    const uint32_t type = uint32_t(address.addressType);
+    REXLOG_ERROR("  {} at {:016X} (within {:016X}..{:016X})",
+                 type < std::size(kAddressTypes) ? kAddressTypes[type] : "?",
+                 address.reportedAddress, first, first + precision);
+    for (const std::string& line : vulkan_instance_->DescribeDeviceAddress(first, precision)) {
+      REXLOG_ERROR("    {}", line);
+    }
+  }
+  for (uint32_t i = 0; i < counts.vendorInfoCount; ++i) {
+    REXLOG_ERROR("  vendor: {} (code {:X}, data {:X})", vendor_infos[i].description,
+                 vendor_infos[i].vendorFaultCode, vendor_infos[i].vendorFaultData);
+  }
+  const std::string& log_file = REXCVAR_GET(log_file);
+  if (!vendor_binary.empty() && !log_file.empty()) {
+    const std::filesystem::path path =
+        rex::to_path(log_file).parent_path() / "vulkan-device-fault.bin";
+    std::ofstream file(path, std::ios::binary);
+    file.write(reinterpret_cast<const char*>(vendor_binary.data()),
+               std::streamsize(counts.vendorBinarySize));
+    file.close();
+    if (file) {
+      REXLOG_ERROR("  the driver's crash data ({} bytes): {}", counts.vendorBinarySize,
+                   rex::path_to_utf8(path));
+    } else {
+      REXLOG_ERROR("  the driver's crash data ({} bytes) could not be written to {}",
+                   counts.vendorBinarySize, rex::path_to_utf8(path));
+    }
+  }
 }
 
 VulkanDevice::~VulkanDevice() {

@@ -102,6 +102,10 @@ REXCVAR_DEFINE_BOOL(present_dither, false, "UI/Presenter",
 REXCVAR_DEFINE_BOOL(present_allow_overscan_cutoff, false, "UI/Presenter",
                     "Allow overscan cutoff based on safe area settings");
 
+REXCVAR_DEFINE_BOOL(present_upscaler_supersample_temp, false, "UI/Presenter",
+                    "TEMP: a temporal upscaler on a render larger than the output runs 1:1 at the "
+                    "render size, then bilinear down to the output");
+
 namespace {
 using GuestOutputPaintConfig = rex::ui::Presenter::GuestOutputPaintConfig;
 
@@ -1072,10 +1076,14 @@ Presenter::GuestOutputPaintFlow Presenter::GetGuestOutputPaintFlow(
     const bool temporal_fits = is_temporal_effect &&
                                ffx_last_size.first <= output_width_clamped &&
                                ffx_last_size.second <= output_height_clamped;
+    const bool temporal_supersample = is_temporal_effect && !temporal_fits &&
+                                      REXCVAR_GET(present_upscaler_supersample_temp) &&
+                                      ffx_last_size.first <= max_rt_width &&
+                                      ffx_last_size.second <= max_rt_height;
     if ((config.GetEffect() == GuestOutputPaintConfig::Effect::kFsr || is_temporal_effect) &&
         ((ffx_last_size.first < output_width_clamped ||
           ffx_last_size.second < output_height_clamped) ||
-         temporal_quality_mode_forced || temporal_fits)) {
+         temporal_quality_mode_forced || temporal_fits || temporal_supersample)) {
       // AMD FidelityFX Super Resolution - upsample along at least one axis.
       // Using the output size clamped to the maximum render target size here as
       // EASU will always write to intermediate images, and RCAS supports only
@@ -1116,8 +1124,10 @@ Presenter::GuestOutputPaintFlow Presenter::GetGuestOutputPaintFlow(
 
         // A single temporal upscaler dispatch can target the final clamped
         // size directly, unlike the spatial multi-pass chain.
-        ffx_last_size.first = output_width_clamped;
-        ffx_last_size.second = output_height_clamped;
+        if (!temporal_supersample) {
+          ffx_last_size.first = output_width_clamped;
+          ffx_last_size.second = output_height_clamped;
+        }
         assert_true(flow.effect_count < flow.effects.size());
         flow.effect_output_sizes[flow.effect_count] = ffx_last_size;
         flow.effects[flow.effect_count++] = GuestOutputPaintEffect::kFsrEasu;

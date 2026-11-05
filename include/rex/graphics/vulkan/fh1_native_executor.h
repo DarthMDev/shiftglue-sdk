@@ -78,8 +78,9 @@ class Fh1NativeExecutor {
                     memory::Memory& memory);
   ~Fh1NativeExecutor();
 
-  // Writes these guest bytes, as the GPU has them now, to fh1_resolve_dump_dir.
-  void DumpResolveOutput(uint32_t address, uint32_t length);
+  // Writes these guest bytes, as the GPU has them now, to fh1_resolve_dump_dir;
+  // returns the file name.
+  std::string DumpResolveOutput(uint32_t address, uint32_t length);
 
   bool Initialize(const Fh1VulkanExecutorConfig& config);
   void Shutdown();
@@ -994,6 +995,10 @@ class Fh1NativeExecutor {
   // fh1_resolve_dump_dir: dumps the resolve's output in the frames asked for.
   void DumpResolveOnRequest(uint32_t address, uint32_t length);
   void DumpScaledResolveRanges();
+  // At scale: the range's part of the scaled resolve buffer, to that file name.
+  void DumpScaledResolveRange(uint32_t address, uint32_t length, const std::string& name);
+  // fh1_resolve_dump_hold: the last copy's destination, logged with its dump.
+  std::string resolve_dump_note_;
   // Copies a buffer range to fh1_resolve_dump_dir/name, waiting for the GPU.
   void DumpBufferRange(VkBuffer source, VkDeviceSize offset, VkDeviceSize length,
                        const std::string& name);

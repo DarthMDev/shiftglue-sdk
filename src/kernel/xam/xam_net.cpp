@@ -12,13 +12,16 @@
 // Disable warnings about unused parameters for kernel functions
 #pragma GCC diagnostic ignored "-Wunused-parameter"
 
+#include <algorithm>
 #include <cstring>
+#include <random>
 
 #if REX_PLATFORM_MAC
 #include <sys/select.h>
 #endif
 
 #include <rex/chrono/clock.h>
+#include <rex/cvar.h>
 #include <rex/kernel/xam/module.h>
 #include <rex/kernel/xam/private.h>
 #include <rex/kernel/xboxkrnl/error.h>
@@ -230,11 +233,22 @@ u32 NetDll_XNetGetOpt_entry(u32 one, u32 option_id, mapped_void buffer_ptr,
   }
 }
 
-u32 NetDll_XNetRandom_entry(u32 caller, mapped_void buffer_ptr, u32 length) {
-  // For now, constant values.
-  // This makes replicating things easier.
-  std::memset(buffer_ptr, 0xBB, length);
+// Titles draw gameplay choices from XNetRandom, not only network nonces: FM4 picks its race
+// music with it (i2kiselev/fm4-static-recomp#57), so constant bytes fix the song order.
+REXCVAR_DEFINE_BOOL(xnet_random_constant, false, "Kernel",
+                    "XNetRandom fills every buffer with 0xBB, the old constant stub (diagnostic)");
 
+u32 NetDll_XNetRandom_entry(u32 caller, mapped_void buffer_ptr, u32 length) {
+  if (REXCVAR_GET(xnet_random_constant)) {
+    std::memset(buffer_ptr, 0xBB, length);
+    return 0;
+  }
+  std::random_device device;
+  auto* bytes = static_cast<uint8_t*>(static_cast<void*>(buffer_ptr));
+  for (u32 i = 0; i < length; i += 4) {
+    const uint32_t value = device();
+    std::memcpy(bytes + i, &value, std::min<u32>(4, length - i));
+  }
   return 0;
 }
 

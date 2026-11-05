@@ -273,9 +273,11 @@ class VulkanPresenter final : public Presenter {
     }
 
     bool Initialize();
+    // TRANSFER_DST: DLSS clears the image it upscales into.
     bool CreateImage(VkImage& image, VkDeviceMemory& memory, VkImageView& view,
                      VkFormat format = kGuestOutputFormat,
                      VkImageUsageFlags usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
+                                               VK_IMAGE_USAGE_TRANSFER_DST_BIT |
                                                VK_IMAGE_USAGE_SAMPLED_BIT |
                                                VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
                                                VK_IMAGE_USAGE_STORAGE_BIT);

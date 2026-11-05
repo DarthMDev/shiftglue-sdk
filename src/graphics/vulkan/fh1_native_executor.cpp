@@ -44,6 +44,10 @@ REXCVAR_DEFINE_BOOL(fh1_scaled_msaa_single_sample, false, "GPU",
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 REXCVAR_DECLARE(bool, fh1_readback_all_resolves);
 REXCVAR_DECLARE(bool, fh1_readback_all_resolves_hold);
+REXCVAR_DEFINE_BOOL(fh1_hold_resolve_sync, false, "GPU",
+                    "Diagnostics: while fh1_readback_all_resolves_hold is set (FM4: a car "
+                    "thumbnail), a full memory barrier and a wait for the GPU after every resolve, "
+                    "with the readbacks copied into guest memory at once (Vulkan)");
 REXCVAR_DECLARE(bool, fh1_async_recurring_readbacks);
 
 REXCVAR_DEFINE_BOOL(fh1_surface_rows_on_demand, true, "GPU",
@@ -2897,8 +2901,18 @@ bool Fh1NativeExecutor::ResolveToMemory(const SourceRect& source, const SurfaceK
                                                                   : "fh1 resolve");
   // 16x16 groups, as fh1_native_resolve_memory.cs.hlsl's Vulkan variants.
   if (!REXCVAR_GET(fh1_debug_skip_resolve_dispatches)) {
+    if (command_processor_.checkpoints_enabled()) {
+      command_processor_.Checkpoint(
+          VulkanCommandProcessor::CheckpointKind::kCompute, UINT32_MAX,
+          fmt::format("resolve to memory {:08X} pitch {} {}x{} buffer offset {:X} range {:X}{}",
+                      dest_base, dest_pitch, rect.right - rect.left, rect.bottom - rect.top,
+                      memory_offset, memory_range,
+                      image_view != VK_NULL_HANDLE ? " + texture" : ""));
+    }
     command_buffer.CmdVkDispatch((uint32_t(rect.right - rect.left) + 15) / 16,
                                  (uint32_t(rect.bottom - rect.top) + 15) / 16, 1);
+    command_processor_.Checkpoint(VulkanCommandProcessor::CheckpointKind::kCompute, UINT32_MAX,
+                                  "resolve to memory end");
   }
   command_processor_.EndDebugLabel();
   return true;
@@ -2926,10 +2940,24 @@ bool Fh1NativeExecutor::NativeResolve(uint32_t& written_address, uint32_t& writt
     QueueResolveReadback(written_address, written_length);
   }
   if (written_length) DumpResolveOnRequest(written_address, written_length);
+  if (written_length && REXCVAR_GET(fh1_hold_resolve_sync) &&
+      REXCVAR_GET(fh1_readback_all_resolves_hold)) {
+    command_processor_.SubmitBarriers(true);
+    const VkMemoryBarrier barrier = {VK_STRUCTURE_TYPE_MEMORY_BARRIER, nullptr,
+                                     VK_ACCESS_MEMORY_WRITE_BIT,
+                                     VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT};
+    command_processor_.deferred_command_buffer().CmdVkPipelineBarrier(
+        VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 1, &barrier, 0,
+        nullptr, 0, nullptr);
+    command_processor_.Fh1AwaitAllQueueOperations();
+    CompleteResolveReadbacks(UINT64_MAX);
+    static uint64_t synced = 0;
+    if (!(synced++ & 63)) REXGPU_INFO("FH1 hold resolve sync: {} resolves synced", synced);
+  }
   return true;
 }
 
-void Fh1NativeExecutor::DumpResolveOutput(uint32_t address, uint32_t length) {
+std::string Fh1NativeExecutor::DumpResolveOutput(uint32_t address, uint32_t length) {
   // As the D3D12 command processor's fh1_resolve_dump_dir: every resolve's
   // output bytes, waiting for the GPU after each.
   static uint32_t sequence = 0;
@@ -2941,7 +2969,7 @@ void Fh1NativeExecutor::DumpResolveOutput(uint32_t address, uint32_t length) {
   if (!ui::vulkan::util::CreateDedicatedAllocationBuffer(
           vulkan_device, length, VK_BUFFER_USAGE_TRANSFER_DST_BIT,
           ui::vulkan::util::MemoryPurpose::kReadback, buffer, memory)) {
-    return;
+    return {};
   }
   config_.memory->Use(VulkanSharedMemory::Usage::kRead);
   command_processor_.SubmitBarriers(true);
@@ -2949,6 +2977,8 @@ void Fh1NativeExecutor::DumpResolveOutput(uint32_t address, uint32_t length) {
   command_processor_.deferred_command_buffer().CmdVkCopyBuffer(config_.memory->buffer(), buffer,
                                                                1, &region);
   command_processor_.Fh1AwaitAllQueueOperations();
+  char name[64];
+  std::snprintf(name, sizeof(name), "%05u_%08X_%u.bin", sequence++, address, length);
   void* mapped = nullptr;
   if (dfn.vkMapMemory(device, memory, 0, VK_WHOLE_SIZE, 0, &mapped) == VK_SUCCESS) {
     VkMappedMemoryRange range = {};
@@ -2956,8 +2986,6 @@ void Fh1NativeExecutor::DumpResolveOutput(uint32_t address, uint32_t length) {
     range.memory = memory;
     range.size = VK_WHOLE_SIZE;
     dfn.vkInvalidateMappedMemoryRanges(device, 1, &range);
-    char name[64];
-    std::snprintf(name, sizeof(name), "%05u_%08X_%u.bin", sequence++, address, length);
     std::ofstream(std::filesystem::path(REXCVAR_GET(fh1_resolve_dump_dir)) / name,
                   std::ios::binary)
         .write(static_cast<const char*>(mapped), std::streamsize(length));
@@ -2965,6 +2993,7 @@ void Fh1NativeExecutor::DumpResolveOutput(uint32_t address, uint32_t length) {
   }
   dfn.vkDestroyBuffer(device, buffer, nullptr);
   dfn.vkFreeMemory(device, memory, nullptr);
+  return name;
 }
 
 void Fh1NativeExecutor::QueueResolveReadback(uint32_t address, uint32_t length) {
@@ -3167,6 +3196,14 @@ bool Fh1NativeExecutor::Resolve(uint32_t* written_address, uint32_t* written_len
     LogProfiledResolve(plan);
     const uint32_t extent_start = resolve_info.copy_dest_extent_start;
     const uint32_t extent_length = resolve_info.copy_dest_extent_length;
+    if (!REXCVAR_GET(fh1_resolve_dump_dir).empty()) {
+      resolve_dump_note_ = fmt::format(
+          "base {:08X} dest_info {:08X} coords {:08X} dest {:08X} pitch {} rect {},{}-{},{} "
+          "source {} kind {}",
+          resolve_info.copy_dest_base, resolve_info.copy_dest_info.value,
+          resolve_info.copy_dest_coordinate_info.packed, plan.dest_base, plan.dest_pitch,
+          plan.x0, plan.y0, plan.x1, plan.y1, plan.resolve_key.Describe(), plan.kind);
+    }
     // The shader addresses guest memory from dest_base; the descriptor starts
     // at an aligned offset at or before both it and the written extent.
     const ui::vulkan::VulkanDevice* vulkan_device = command_processor_.GetVulkanDevice();

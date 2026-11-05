@@ -54,6 +54,28 @@ TEST_CASE("a run after a short gap is read back while the range is new",
   CHECK_FALSE(next.read_back);
 }
 
+TEST_CASE("every run is read back in its first kHeldRunReadbackFrames while held",
+          "[graphics][readbacks]") {
+  Readbacks r;
+  r.Frames(1, 3);
+  CHECK_FALSE(r.A(200).read_back);
+  const uint64_t start = 210, end = start + Fm4ResolveReadbacks::kHeldRunReadbackFrames;
+  for (uint64_t frame = start; frame <= end; ++frame) {
+    CAPTURE(frame);
+    CHECK(r.readbacks.Resolve(kAddress, kLength, frame, false, true).read_back == (frame < end));
+  }
+  CHECK_FALSE(r.readbacks.IsFirstRun(kAddress, kLength));
+}
+
+TEST_CASE("a re-render within the run gap is read back while held", "[graphics][readbacks]") {
+  // fm4-static-recomp #52: the clear-only map, then the loaded one 3 frames later.
+  Readbacks r;
+  CHECK(r.readbacks.Resolve(kAddress, kLength, 1393, false, true).read_back);
+  const auto rerender = r.readbacks.Resolve(kAddress, kLength, 1396, false, true);
+  CHECK_FALSE(rerender.run_start);
+  CHECK(rerender.read_back);
+}
+
 TEST_CASE("a range idle longer than kIdleFrames is new again", "[graphics][readbacks]") {
   Readbacks r;
   r.A(1);

@@ -796,7 +796,9 @@ void VulkanTextureCache::ResampleInheritedResolves() {
                                         sizeof(constants), constants);
       command_processor_.SubmitBarriers(true);
       const uint64_t dest_words = length * dest_area / 4;
+      command_processor_.Checkpoint(VulkanCommandProcessor::CheckpointKind::kCompute, UINT32_MAX, "resample inherited resolves");
       command_buffer.CmdVkDispatch(uint32_t((dest_words + 255) / 256), 1, 1);
+      command_processor_.Checkpoint(VulkanCommandProcessor::CheckpointKind::kCompute, UINT32_MAX, "resample inherited resolves end");
       guest_bytes += length;
     }
     MarkRangeAsResolved(run.start, run.length, run.bpb_log2);
@@ -2942,8 +2944,10 @@ bool VulkanTextureCache::LoadTextureDataFromResidentMemoryUntimed(Texture& textu
                                             &load_constants_float_convert.host_offset);
         }
         command_processor_.SubmitBarriers(true);
+        command_processor_.Checkpoint(VulkanCommandProcessor::CheckpointKind::kCompute, UINT32_MAX, "texture load from resident memory");
         command_buffer.CmdVkDispatch(group_count_x, group_count_y,
                                      load_constants_float_convert.size_blocks[2]);
+        command_processor_.Checkpoint(VulkanCommandProcessor::CheckpointKind::kCompute, UINT32_MAX, "texture load from resident memory end");
         load_constants_float_convert.guest_offset += level_array_slice_stride_bytes;
         load_constants_float_convert.host_offset += level_array_slice_stride_bytes;
       }

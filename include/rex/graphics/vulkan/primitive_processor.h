@@ -47,6 +47,9 @@ class VulkanPrimitiveProcessor final : public PrimitiveProcessor {
   std::pair<VkBuffer, VkDeviceSize> GetConvertedIndexBuffer(size_t handle) const {
     return frame_index_buffers_[handle];
   }
+  const uint8_t* GetConvertedIndexBufferMapping(size_t handle) const {
+    return frame_index_mappings_[handle];
+  }
 
  protected:
   bool InitializeBuiltinIndexBuffer(size_t size_bytes,
@@ -75,6 +78,7 @@ class VulkanPrimitiveProcessor final : public PrimitiveProcessor {
   std::unique_ptr<ui::vulkan::VulkanUploadBufferPool> frame_index_buffer_pool_;
   // Indexed by the backend handles.
   std::deque<std::pair<VkBuffer, VkDeviceSize>> frame_index_buffers_;
+  std::deque<const uint8_t*> frame_index_mappings_;
 };
 
 }  // namespace rex::graphics::vulkan

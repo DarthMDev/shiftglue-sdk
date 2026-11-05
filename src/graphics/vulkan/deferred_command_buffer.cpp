@@ -14,11 +14,14 @@
 #include <cstring>
 
 #include <rex/assert.h>
+#include <rex/cvar.h>
 #include <rex/dbg.h>
 #include <rex/graphics/flags.h>
 #include <rex/graphics/vulkan/command_processor.h>
 #include <rex/graphics/vulkan/deferred_command_buffer.h>
 #include <rex/math.h>
+
+REXCVAR_DECLARE(bool, vulkan_diagnostic_checkpoints_serialize);
 
 namespace rex::graphics::vulkan {
 
@@ -44,6 +47,9 @@ void DeferredCommandBuffer::Execute(VkCommandBuffer command_buffer) {
   // A pipeline that was still being built when its draws were recorded and is
   // still missing now: those draws are left out until the next bind.
   bool skip_graphics_draws = false;
+  // A barrier is not allowed inside a render pass: checkpoints there stay unserialized.
+  const bool serialize_checkpoints = REXCVAR_GET(vulkan_diagnostic_checkpoints_serialize);
+  bool in_render_pass = false;
   while (stream_remaining) {
     const CommandHeader& header = *reinterpret_cast<const CommandHeader*>(stream);
     stream += kCommandHeaderSizeElements;
@@ -51,6 +57,7 @@ void DeferredCommandBuffer::Execute(VkCommandBuffer command_buffer) {
 
     switch (header.command) {
       case Command::kVkBeginRenderPass: {
+        in_render_pass = true;
         auto& args = *reinterpret_cast<const ArgsVkBeginRenderPass*>(stream);
         size_t offset_bytes = sizeof(ArgsVkBeginRenderPass);
         VkRenderPassBeginInfo render_pass_begin_info;
@@ -222,10 +229,12 @@ void DeferredCommandBuffer::Execute(VkCommandBuffer command_buffer) {
       } break;
 
       case Command::kVkEndRenderPass:
+        in_render_pass = false;
         dfn.vkCmdEndRenderPass(command_buffer);
         break;
 
       case Command::kVkBeginRendering: {
+        in_render_pass = true;
         auto& args = *reinterpret_cast<const ArgsVkBeginRendering*>(stream);
         size_t offset_bytes =
             rex::align(sizeof(ArgsVkBeginRendering), alignof(VkRenderingAttachmentInfo));
@@ -261,6 +270,7 @@ void DeferredCommandBuffer::Execute(VkCommandBuffer command_buffer) {
       } break;
 
       case Command::kVkEndRendering:
+        in_render_pass = false;
         dfn.vkCmdEndRendering(command_buffer);
         break;
 
@@ -353,6 +363,14 @@ void DeferredCommandBuffer::Execute(VkCommandBuffer command_buffer) {
 
       case Command::kVkSetCheckpointNV: {
         auto& args = *reinterpret_cast<const ArgsVkSetCheckpointNV*>(stream);
+        if (serialize_checkpoints && !in_render_pass) {
+          VkMemoryBarrier barrier = {VK_STRUCTURE_TYPE_MEMORY_BARRIER, nullptr,
+                                     VK_ACCESS_MEMORY_WRITE_BIT,
+                                     VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT};
+          dfn.vkCmdPipelineBarrier(command_buffer, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+                                   VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 1, &barrier, 0,
+                                   nullptr, 0, nullptr);
+        }
         dfn.vkCmdSetCheckpointNV(command_buffer,
                                  reinterpret_cast<const void*>(uintptr_t(args.marker)));
       } break;
