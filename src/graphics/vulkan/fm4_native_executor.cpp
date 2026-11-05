@@ -88,6 +88,12 @@ REXCVAR_DEFINE_BOOL(fh1_surfaceless_clears, true, "GPU",
 REXCVAR_DECLARE(bool, fh1_scaled_msaa_single_sample);
 REXCVAR_DECLARE(std::string, fh1_resolve_dump_dir);
 REXCVAR_DECLARE(int32_t, fh1_resolve_dump_frame);
+REXCVAR_DECLARE(bool, fh1_readback_all_resolves_hold);
+REXCVAR_DEFINE_BOOL(fh1_resolve_dump_hold, false, "GPU",
+                    "Diagnostics: with fh1_resolve_dump_dir, dump only the resolves made while "
+                    "fh1_readback_all_resolves_hold is set (FM4: a car thumbnail, from its render "
+                    "until it is saved), at scale also their scaled bytes, and log each dump's "
+                    "destination format, pitch and rectangle (Vulkan)");
 
 namespace rex::graphics::vulkan {
 
@@ -461,6 +467,13 @@ void Fh1NativeExecutor::MaterializeResolveClears(CopyPlan& plan) {
 
 void Fh1NativeExecutor::DumpResolveOnRequest(uint32_t address, uint32_t length) {
   if (REXCVAR_GET(fh1_resolve_dump_dir).empty()) return;
+  if (REXCVAR_GET(fh1_resolve_dump_hold)) {
+    if (!REXCVAR_GET(fh1_readback_all_resolves_hold)) return;
+    const std::string name = DumpResolveOutput(address, length);
+    REXGPU_INFO("FH1 resolve dump {} frame {}: {}", name, frame_, resolve_dump_note_);
+    if (scale_ > 1) DumpScaledResolveRange(address, length, "scaled_" + name);
+    return;
+  }
   const int32_t dump_frame = REXCVAR_GET(fh1_resolve_dump_frame);
   if (dump_frame < 0 && dump_trigger_checked_frame_ != frame_) {
     // A negative frame dumps the frame after a file named "trigger" appears
@@ -497,22 +510,27 @@ void Fh1NativeExecutor::DumpScaledResolveRanges() {
   std::filesystem::remove(dump_dir / "dump_scaled", error);
   if (scale_ <= 1) return;
   for (const auto& [range_address, range_length] : ranges) {
-    uint64_t start, size;
-    // Committing first: a copy from unbound sparse memory is undefined.
-    if (!config_.textures->GetScaledResolveRange(range_address, range_length, 0, start, size) ||
-        !config_.textures->CommitScaledResolveRange(range_address, range_length)) {
-      continue;
-    }
-    command_processor_.PushBufferMemoryBarrier(
-        config_.textures->scaled_resolve_buffer(), start, size,
-        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
-        VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT, VK_QUEUE_FAMILY_IGNORED,
-        VK_QUEUE_FAMILY_IGNORED, false);
-    DumpBufferRange(config_.textures->scaled_resolve_buffer(), start, size,
-                    fmt::format("scaled_{:08X}_{:X}.bin", range_address, range_length));
-    REXGPU_INFO("FH1 debug scaled {:08X}+{:X}: scale {} bytes {:X} at {:X}", range_address,
-                range_length, scale_, size, start);
+    DumpScaledResolveRange(range_address, range_length,
+                           fmt::format("scaled_{:08X}_{:X}.bin", range_address, range_length));
   }
+}
+
+void Fh1NativeExecutor::DumpScaledResolveRange(uint32_t address, uint32_t length,
+                                               const std::string& name) {
+  uint64_t start, size;
+  // Committing first: a copy from unbound sparse memory is undefined.
+  if (!config_.textures->GetScaledResolveRange(address, length, 0, start, size) ||
+      !config_.textures->CommitScaledResolveRange(address, length)) {
+    return;
+  }
+  command_processor_.PushBufferMemoryBarrier(
+      config_.textures->scaled_resolve_buffer(), start, size,
+      VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+      VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT, VK_QUEUE_FAMILY_IGNORED,
+      VK_QUEUE_FAMILY_IGNORED, false);
+  DumpBufferRange(config_.textures->scaled_resolve_buffer(), start, size, name);
+  REXGPU_INFO("FH1 debug scaled {:08X}+{:X}: scale {} bytes {:X} at {:X}", address, length,
+              scale_, size, start);
 }
 
 void Fh1NativeExecutor::DumpBufferRange(VkBuffer source, VkDeviceSize offset, VkDeviceSize length,
