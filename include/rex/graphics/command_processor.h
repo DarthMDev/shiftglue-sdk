@@ -11,6 +11,8 @@
 
 #pragma once
 
+#include <rex/graphics/shader_storage_initialization.h>
+
 #include <array>
 #include <chrono>
 #if defined(_WIN32) && (defined(__x86_64__) || defined(_M_X64))
@@ -165,8 +167,9 @@ class CommandProcessor {
   // May be called not only from the command processor thread when the command
   // processor is paused, and the termination of this function may be explicitly
   // awaited.
-  virtual void InitializeShaderStorage(const std::filesystem::path& cache_root, uint32_t title_id,
-                                       bool blocking);
+  virtual void InitializeShaderStorage(
+      const std::filesystem::path& cache_root, uint32_t title_id, bool blocking,
+      std::shared_ptr<ShaderStorageInitialization> initialization = {});
 
   void InitializeRingBuffer(uint32_t ptr, uint32_t size_log2);
   void EnableReadPointerWriteBack(uint32_t ptr, uint32_t block_size_log2);

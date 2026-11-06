@@ -10,6 +10,8 @@
  * @modified    Tom Clay, 2026 - Adapted for ReXGlue runtime
  */
 
+#include <rex/graphics/shader_storage_initialization.h>
+
 #include <array>
 #include <atomic>
 #include <climits>
@@ -148,8 +150,9 @@ class VulkanCommandProcessor : public CommandProcessor {
   void OnReduceMemory() override;
   void InvalidateGpuMemory() override;
   void LogHostGpuLoss() override { LogCheckpoints(); }
-  void InitializeShaderStorage(const std::filesystem::path& cache_root, uint32_t title_id,
-                               bool blocking) override;
+  void InitializeShaderStorage(
+      const std::filesystem::path& cache_root, uint32_t title_id, bool blocking,
+      std::shared_ptr<ShaderStorageInitialization> initialization = {}) override;
 
   // Fixed for the processor's lifetime; cached, since draws ask for it many
   // times and provider() is virtual.

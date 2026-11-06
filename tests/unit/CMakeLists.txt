@@ -39,6 +39,9 @@ add_executable(unit_tests
     codegen/register_locals_test.cpp
     filesystem/cache_mount_test.cpp
     filesystem/long_path_test.cpp
+    graphics/shader_storage_initialization_test.cpp
+    graphics/startup_pipeline_compilation_test.cpp
+    graphics/pipeline_cache_file_test.cpp
     graphics/native_guest_output_test.cpp
     graphics/vulkan_shader_overrides_test.cpp
     graphics/cube_lut_test.cpp
@@ -56,6 +59,7 @@ add_executable(unit_tests
     graphics/fm4_reactive_mask_test.cpp
     graphics/fm4_wheel_motion_test.cpp
     graphics/fm4_shadow_motion_test.cpp
+    ui/shader_startup_test.cpp
     ui/presentation_pacer_test.cpp
     ui/fm4_dlss_preset_test.cpp
     ui/upscaler_mip_bias_test.cpp
@@ -66,6 +70,8 @@ add_executable(unit_tests
 target_sources(unit_tests PRIVATE
     ${PROJECT_SOURCE_DIR}/src/rexglue/ui/ui.cpp
     ${PROJECT_SOURCE_DIR}/src/rexglue/ui/progress.cpp
+    ${PROJECT_SOURCE_DIR}/src/graphics/startup_pipeline_compilation.cpp
+    ${PROJECT_SOURCE_DIR}/src/graphics/pipeline_cache_file.cpp
     ${PROJECT_SOURCE_DIR}/src/graphics/vulkan/shader_overrides.cpp
     ${PROJECT_SOURCE_DIR}/src/graphics/cube_lut.cpp
     ${PROJECT_SOURCE_DIR}/src/graphics/pixel_shader_constant_override.cpp
@@ -82,6 +88,8 @@ target_sources(unit_tests PRIVATE
     ${PROJECT_SOURCE_DIR}/src/graphics/fm4_shadow_motion.cpp
     ${PROJECT_SOURCE_DIR}/src/graphics/util/draw.cpp
     ${PROJECT_SOURCE_DIR}/src/graphics/pipeline/texture/util.cpp
+    ${PROJECT_SOURCE_DIR}/src/ui/shader_startup.cpp
+    ${PROJECT_SOURCE_DIR}/src/ui/windowed_app_context.cpp
     ${PROJECT_SOURCE_DIR}/src/ui/graphics_util.cpp
     ${PROJECT_SOURCE_DIR}/src/ui/fm4_dlss_preset.cpp
     ${PROJECT_SOURCE_DIR}/src/graphics/flags.cpp
@@ -105,6 +113,7 @@ target_link_libraries(unit_tests PRIVATE
 # ReXApp is shipped as source for recomp projects, rather than compiled into
 # rexui. Keep its SDK-consumer compilation path covered by the test build.
 add_library(rexapp_compile_test OBJECT
+    graphics/shader_storage_interface_compile_test.cpp
     ${PROJECT_SOURCE_DIR}/src/ui/rex_app.cpp
 )
 target_link_libraries(rexapp_compile_test PRIVATE

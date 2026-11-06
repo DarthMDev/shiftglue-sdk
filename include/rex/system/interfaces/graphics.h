@@ -11,6 +11,8 @@
 
 #pragma once
 
+#include <rex/graphics/shader_storage_initialization.h>
+
 #include <array>
 #include <atomic>
 #include <cstdint>
@@ -222,11 +224,14 @@ class IGraphicsSystem {
   }
 
   // Persistent shader/pipeline storage under the cache root. Default: none.
-  virtual void InitializeShaderStorage(const std::filesystem::path& cache_root, uint32_t title_id,
-                                       bool blocking) {
+  virtual void InitializeShaderStorage(
+      const std::filesystem::path& cache_root, uint32_t title_id, bool blocking,
+      std::shared_ptr<graphics::ShaderStorageInitialization> initialization = {}) {
     (void)cache_root;
     (void)title_id;
     (void)blocking;
+    if (initialization)
+      initialization->Finish();
   }
 
   // One-shot convenience for callers that don't care about the split.

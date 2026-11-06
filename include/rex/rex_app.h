@@ -11,6 +11,8 @@
 
 #pragma once
 
+#include <rex/ui/shader_startup.h>
+
 #include <atomic>
 #include <cstdint>
 #include <filesystem>
@@ -310,6 +312,14 @@ class ReXApp : public ui::WindowedApp, public ui::WindowListener, public ui::Win
   std::unique_ptr<Runtime> runtime_;
   std::atomic<int> guest_input_captures_{0};
   std::unique_ptr<ui::Window> window_;
+  void CompleteModuleLaunch();
+  void UpdateShaderStorageInitialization();
+  std::unique_ptr<ui::ShaderStartup> shader_startup_;
+  std::unique_ptr<ui::ImGuiDialog> shader_startup_dialog_;
+  system::object_ref<system::XThread> prepared_module_thread_;
+  std::shared_ptr<bool> startup_ui_alive_ = std::make_shared<bool>(true);
+  bool shader_startup_finished_ = false;
+  bool shader_startup_close_requested_ = false;
   std::thread module_thread_;
   system::object_ref<system::XThread> suspended_module_thread_;
   std::atomic<bool> shutting_down_{false};

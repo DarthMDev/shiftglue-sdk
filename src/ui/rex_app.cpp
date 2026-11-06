@@ -68,6 +68,60 @@ REXCVAR_DEFINE_STRING(gpu_backend, "any", "GPU",
 
 namespace rex {
 
+namespace {
+class ShaderStorageDialog final : public ui::ImGuiDialog {
+ public:
+  ShaderStorageDialog(ui::ImGuiDrawer* drawer,
+                      std::shared_ptr<graphics::ShaderStorageInitialization> initialization,
+                      std::function<bool()> closing)
+      : ImGuiDialog(drawer),
+        initialization_(std::move(initialization)),
+        closing_(std::move(closing)) {}
+
+ private:
+  void OnDraw(ImGuiIO& io) override {
+    using Phase = graphics::ShaderStorageInitialization::Phase;
+    const auto snapshot = initialization_->GetSnapshot();
+    ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x * 0.5f, io.DisplaySize.y * 0.5f),
+                            ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+    ImGui::SetNextWindowSize(ImVec2(std::min(560.0f, io.DisplaySize.x * 0.9f), 0.0f));
+    if (ImGui::Begin("Starting the game", nullptr,
+                     ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoCollapse |
+                         ImGuiWindowFlags_NoMove | ImGuiWindowFlags_AlwaysAutoResize |
+                         ImGuiWindowFlags_NoSavedSettings)) {
+      if (closing_()) {
+        ImGui::TextWrapped("Closing - waiting for the current graphics operation to finish...");
+      } else if (snapshot.phase == Phase::kFailed) {
+        ImGui::TextWrapped("Shader initialization failed.");
+        ImGui::TextWrapped("%s", snapshot.error.c_str());
+        ImGui::TextWrapped("Close this window and check the game log for details.");
+      } else if (snapshot.phase == Phase::kCancelled) {
+        ImGui::TextUnformatted("Shader initialization cancelled.");
+      } else if (snapshot.phase == Phase::kSaving) {
+        ImGui::TextUnformatted("Saving shader cache...");
+      } else if (snapshot.total_known && snapshot.total) {
+        const auto label =
+            fmt::format("Compiling shaders: {} / {}", snapshot.completed, snapshot.total);
+        ImGui::TextUnformatted(label.c_str());
+        ImGui::ProgressBar(float(double(snapshot.completed) / double(snapshot.total)),
+                           ImVec2(-1.0f, 0.0f), "");
+      } else {
+        ImGui::TextUnformatted("Preparing shaders...");
+      }
+      if (!closing_() && snapshot.phase != Phase::kFailed) {
+        ImGui::Spacing();
+        ImGui::TextWrapped(
+            "This can take a while, depending on your computer. "
+            "Completed work is saved regularly.");
+      }
+    }
+    ImGui::End();
+  }
+  std::shared_ptr<graphics::ShaderStorageInitialization> initialization_;
+  std::function<bool()> closing_;
+};
+}  // namespace
+
 // --- ReXApp ---
 
 ReXApp::~ReXApp() = default;
@@ -531,7 +585,7 @@ void ReXApp::SetupOverlays(rex::ui::Presenter* presenter, rex::ui::ImmediateDraw
 }
 
 void ReXApp::LaunchModule() {
-  app_context().CallInUIThreadDeferred([this]() {
+  ui::ShaderStartup::QueueLaunch(app_context(), startup_ui_alive_, shutting_down_, [this]() {
     // Register the achievement notification callback now that the runtime and
     // KernelState are guaranteed to exist. Done here (not OnCreateDialogs)
     // because KernelState is null during SetupPresentation.
@@ -551,42 +605,103 @@ void ReXApp::LaunchModule() {
     }
 
     OnPreLaunchModule();
+    if (app_context().HasQuitFromUIThread() || shutting_down_.load(std::memory_order_acquire))
+      return;
 
-    auto main_thread = runtime_->PrepareModuleLaunch();
-    if (!main_thread) {
+    prepared_module_thread_ = runtime_->PrepareModuleLaunch();
+    if (!prepared_module_thread_) {
       REXLOG_ERROR("Failed to launch module");
       app_context().QuitFromUIThread();
       return;
     }
 
     auto* graphics_system = runtime_->graphics_system();
-    if (graphics_system && !runtime_->cache_root().empty()) {
-      uint32_t title_id = runtime_->kernel_state()->title_id();
-      if (title_id != 0) {
-        REXLOG_INFO("Initializing shader storage for title {:08X}...", title_id);
-        graphics_system->InitializeShaderStorage(runtime_->cache_root(), title_id, true);
+    const uint32_t title_id = runtime_->kernel_state()->title_id();
+    if (graphics_system && !runtime_->cache_root().empty() && title_id != 0) {
+      REXLOG_INFO("Initializing shader storage for title {:08X}...", title_id);
+      auto* context = &app_context();
+      std::weak_ptr<bool> alive = startup_ui_alive_;
+      shader_startup_finished_ = false;
+      shader_startup_ = std::make_unique<ui::ShaderStartup>(
+          [graphics_system, cache_root = runtime_->cache_root(), title_id](auto initialization) {
+            graphics_system->InitializeShaderStorage(cache_root, title_id, true,
+                                                     std::move(initialization));
+          },
+          [this, alive, context] {
+            context->CallInUIThreadDeferred([this, alive] {
+              if (!alive.expired())
+                UpdateShaderStorageInitialization();
+            });
+          });
+      if (imgui_drawer_) {
+        shader_startup_dialog_ = std::make_unique<ShaderStorageDialog>(
+            imgui_drawer_.get(), shader_startup_->initialization(),
+            [this] { return shader_startup_close_requested_; });
+        window_->RequestPresenterUIPaintFromUIThread();
       }
-    }
-
-    OnPostLaunchModule(main_thread.get());
-    if (!ShouldStartModuleThread()) {
-      REXLOG_INFO("Module launched suspended");
-      suspended_module_thread_ = std::move(main_thread);
+      shader_startup_->Start();
       return;
     }
-    main_thread->Resume();
-
-    module_thread_ = std::thread([this, main_thread = std::move(main_thread)]() mutable {
-      // This is the host launcher join, not a guest kernel wait.
-      session_probe::Suppress host_join;
-      main_thread->Wait(0, 0, 0, nullptr);
-      OnGuestThreadExit(main_thread.get());
-      REXLOG_INFO("Execution complete");
-      if (!shutting_down_.load(std::memory_order_acquire)) {
-        app_context().CallInUIThread([this]() { app_context().QuitFromUIThread(); });
-      }
-    });
+    CompleteModuleLaunch();
   });
+}
+
+void ReXApp::UpdateShaderStorageInitialization() {
+  if (!shader_startup_)
+    return;
+  if (app_context().HasQuitFromUIThread()) {
+    shutting_down_.store(true, std::memory_order_release);
+    shader_startup_->RequestCancel();
+    return;
+  }
+  auto result = shader_startup_->TakeResult();
+  if (window_)
+    window_->RequestPresenterUIPaintFromUIThread();
+  if (!result)
+    return;
+  shader_startup_finished_ = true;
+  if (shader_startup_close_requested_ || shutting_down_.load(std::memory_order_acquire)) {
+    app_context().CallInUIThreadDeferred([this, alive = std::weak_ptr<bool>(startup_ui_alive_)] {
+      if (!alive.expired() && window_)
+        window_->RequestClose();
+    });
+    return;
+  }
+  if (result->phase != graphics::ShaderStorageInitialization::Phase::kSucceeded) {
+    REXLOG_ERROR("Startup shader initialization stopped: {}", result->error);
+    return;
+  }
+  shader_startup_dialog_.reset();
+  shader_startup_.reset();
+  CompleteModuleLaunch();
+}
+
+void ReXApp::CompleteModuleLaunch() {
+  if (!prepared_module_thread_)
+    return;
+  ui::ShaderStartup::CompleteLaunch(
+      app_context(), shutting_down_, [this] { OnPostLaunchModule(prepared_module_thread_.get()); },
+      [this] {
+        if (!ShouldStartModuleThread()) {
+          REXLOG_INFO("Module launched suspended");
+          suspended_module_thread_ = std::move(prepared_module_thread_);
+          return;
+        }
+        if (app_context().HasQuitFromUIThread() || shutting_down_.load(std::memory_order_acquire))
+          return;
+        auto main_thread = std::move(prepared_module_thread_);
+        REXLOG_INFO("Shader initialization complete; starting guest main thread");
+        main_thread->Resume();
+        module_thread_ = std::thread([this, main_thread = std::move(main_thread)]() mutable {
+          session_probe::Suppress host_join;
+          main_thread->Wait(0, 0, 0, nullptr);
+          OnGuestThreadExit(main_thread.get());
+          REXLOG_INFO("Execution complete");
+          if (!shutting_down_.load(std::memory_order_acquire)) {
+            app_context().CallInUIThread([this]() { app_context().QuitFromUIThread(); });
+          }
+        });
+      });
 }
 
 std::function<void(PathConfig)> ReXApp::MakeResumeCallback() {
@@ -629,6 +744,17 @@ void ReXApp::OnClosing(ui::UIEvent& e) {
 
 bool ReXApp::OnCloseRequested(ui::UIEvent& e) {
   (void)e;
+  if (shader_startup_) {
+    shader_startup_close_requested_ = true;
+    shutting_down_.store(true, std::memory_order_release);
+    shader_startup_->RequestCancel();
+    if (window_)
+      window_->RequestPresenterUIPaintFromUIThread();
+    if (!shader_startup_finished_) {
+      REXLOG_INFO("Startup close requested; waiting for in-flight shader work");
+      return false;
+    }
+  }
   return OnWindowCloseRequested();
 }
 
@@ -670,6 +796,11 @@ void ReXApp::OnRestored(ui::UIEvent& e) {
 }
 
 void ReXApp::OnDestroy() {
+  shutting_down_.store(true, std::memory_order_release);
+  startup_ui_alive_.reset();
+  shader_startup_.reset();
+  shader_startup_dialog_.reset();
+  prepared_module_thread_.reset();
   // Notify subclass before cleanup
   OnShutdown();
 

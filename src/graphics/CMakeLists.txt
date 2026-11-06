@@ -15,6 +15,8 @@ set(REXGPU_XENOS_SOURCES
     format/ucode.cpp
 
     # GPU system
+    startup_pipeline_compilation.cpp
+    pipeline_cache_file.cpp
     graphics_system.cpp
     command_processor.cpp
     d3d_census_decoder.cpp

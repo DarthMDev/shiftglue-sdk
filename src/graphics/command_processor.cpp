@@ -403,8 +403,9 @@ void CommandProcessor::Shutdown() {
   worker_thread_.reset();
 }
 
-void CommandProcessor::InitializeShaderStorage(const std::filesystem::path& cache_root,
-                                               uint32_t title_id, bool blocking) {}
+void CommandProcessor::InitializeShaderStorage(
+    const std::filesystem::path& cache_root, uint32_t title_id, bool blocking,
+    std::shared_ptr<ShaderStorageInitialization> initialization) {}
 
 void CommandProcessor::CallInThread(std::function<void()> fn) {
   cs_scheduler::Actor scheduled(cs_scheduler::kMain);

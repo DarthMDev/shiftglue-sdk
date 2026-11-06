@@ -13,6 +13,8 @@
 
 #include "rex/system/function_dispatcher.h"
 
+#include <rex/graphics/shader_storage_initialization.h>
+
 #include <atomic>
 #include <cstdint>
 #include <functional>
@@ -102,8 +104,9 @@ class GraphicsSystem : public system::IGraphicsSystem {
   virtual void ClearCaches();
   virtual void InvalidateGpuMemory();
 
-  void InitializeShaderStorage(const std::filesystem::path& cache_root, uint32_t title_id,
-                               bool blocking) override;
+  void InitializeShaderStorage(
+      const std::filesystem::path& cache_root, uint32_t title_id, bool blocking,
+      std::shared_ptr<ShaderStorageInitialization> initialization = {}) override;
 
   bool is_paused() const { return paused_; }
   void Pause() override;
