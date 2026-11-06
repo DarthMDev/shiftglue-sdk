@@ -439,11 +439,13 @@ void SharedMemory::CopyReadbackToGuest(uint32_t start, const uint8_t* source, ui
         // This is a GPU readback, not a guest CPU store. Update only these
         // bytes of a preserved page's CPU baseline, leaving any unrelated
         // hidden stores detectable.
-        auto global_lock = global_critical_region_.Acquire(kSharedMemoryLockSource);
-        auto snapshot = unprotected_gpu_pages_.find(page);
-        if (snapshot != unprotected_gpu_pages_.end()) {
-          std::memcpy(snapshot->second.data() + (address & (page_size - 1)),
-                      source + offset, chunk);
+        if (unprotected_gpu_pages_pending_.load(std::memory_order_acquire)) {
+          auto global_lock = global_critical_region_.Acquire(kSharedMemoryLockSource);
+          auto snapshot = unprotected_gpu_pages_.find(page);
+          if (snapshot != unprotected_gpu_pages_.end()) {
+            std::memcpy(snapshot->second.data() + (address & (page_size - 1)),
+                        source + offset, chunk);
+          }
         }
       }
     }

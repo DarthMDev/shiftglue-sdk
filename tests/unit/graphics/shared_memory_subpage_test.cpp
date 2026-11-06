@@ -1,4 +1,12 @@
-// Copyright (c) 2026, FM4 Static Recomp contributors. BSD-3-Clause.
+/**
+ * @file        tests/unit/graphics/shared_memory_subpage_test.cpp
+ *
+ * @copyright   Copyright (c) 2026 i2kiselev
+ *              All rights reserved.
+ *
+ * @license     BSD 3-Clause License
+ *              See LICENSE file in the project root for full license text.
+ */
 #include <array>
 #include <cstdio>
 #include <cstdlib>
@@ -105,6 +113,39 @@ TEST_CASE("CPU writes to neighboring guest pages survive host-page unprotection"
     Check(shared.RequestRange(physical, 4096), "request range detects hidden write");
     Check(shared.CheckUnprotectedGpuPages(), "latched change is consumed by IssueDraw");
     Check(!shared.CheckUnprotectedGpuPages(), "latched change does not repeat after being consumed");
+
+    shared.InvalidateAllPages();
+    shared.RangeWrittenByGpu(physical, 16384);
+    uint32_t partial_readback_invalidations = 0;
+    shared.WatchMemoryRange(
+        physical + 4096, 4096,
+        [](const std::unique_lock<std::recursive_mutex>&, void* context, void*, uint64_t,
+           bool gpu) {
+          if (!gpu)
+            ++*static_cast<uint32_t*>(context);
+        },
+        &partial_readback_invalidations, nullptr, 0);
+    *reinterpret_cast<volatile uint32_t*>(cpu) = 3;
+    *reinterpret_cast<volatile uint32_t*>(cpu + 4096 + 64) = 0xAABBCCDD;
+    Check(shared.CountValidPages(physical + 4096, 4096).second == 1,
+          "hidden store leaves the neighbor GPU-owned before detection");
+    std::array<uint8_t, 16> partial_readback;
+    partial_readback.fill(5);
+    shared.CopyReadbackToGuest(physical + 4096 + 128, partial_readback.data(),
+                               uint32_t(partial_readback.size()));
+    Check(std::memcmp(cpu + 4096 + 128, partial_readback.data(), partial_readback.size()) == 0,
+          "partial GPU readback reaches guest memory");
+    Check(*reinterpret_cast<volatile uint32_t*>(cpu + 4096 + 64) == 0xAABBCCDD,
+          "disjoint readback preserves the CPU store");
+    Check(shared.RequestRange(physical, 4096), "detect hidden store after disjoint readback");
+    Check(partial_readback_invalidations == 1,
+          "partial readback does not hide the CPU store from texture watches");
+    Check(shared.CountValidPages(physical + 4096, 4096).first == 0,
+          "page with hidden store still requires upload after partial readback");
+    Check(shared.CountValidPages(physical + 8192, 8192).second == 2,
+          "partial readback and hidden store preserve other GPU pages");
+    Check(shared.CheckUnprotectedGpuPages(), "partial-readback hidden change stays latched for draw");
+    Check(!shared.CheckUnprotectedGpuPages(), "partial-readback latch is consumed once");
   }
   heap->Release(address, nullptr);
 }
