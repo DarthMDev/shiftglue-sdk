@@ -184,8 +184,9 @@ void D3D12CommandProcessor::InvalidateVertexBufferResidencyRange(uint32_t first_
   }
 }
 
-void D3D12CommandProcessor::InitializeShaderStorage(const std::filesystem::path& cache_root,
-                                                    uint32_t title_id, bool blocking) {
+void D3D12CommandProcessor::InitializeShaderStorage(
+    const std::filesystem::path& cache_root, uint32_t title_id, bool blocking,
+    std::shared_ptr<ShaderStorageInitialization> initialization) {
   CommandProcessor::InitializeShaderStorage(cache_root, title_id, blocking);
   shader_storage_cache_root_ = cache_root;
   shader_storage_title_id_ = title_id;

@@ -1287,12 +1287,13 @@ void VulkanCommandProcessor::InvalidateVertexBufferResidencyRange(uint32_t first
   }
 }
 
-void VulkanCommandProcessor::InitializeShaderStorage(const std::filesystem::path& cache_root,
-                                                     uint32_t title_id, bool blocking) {
+void VulkanCommandProcessor::InitializeShaderStorage(
+    const std::filesystem::path& cache_root, uint32_t title_id, bool blocking,
+    std::shared_ptr<ShaderStorageInitialization> initialization) {
   CommandProcessor::InitializeShaderStorage(cache_root, title_id, blocking);
   shader_storage_cache_root_ = cache_root;
   shader_storage_title_id_ = title_id;
-  pipeline_cache_->InitializeShaderStorage(cache_root, title_id, blocking);
+  pipeline_cache_->InitializeShaderStorage(cache_root, title_id, blocking, initialization);
 }
 
 bool VulkanCommandProcessor::ExecutePacketType3_EVENT_WRITE_ZPD(memory::RingBuffer* reader,

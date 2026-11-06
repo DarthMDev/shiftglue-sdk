@@ -10,6 +10,8 @@
  * @modified    Tom Clay, 2026 - Adapted for ReXGlue runtime
  */
 
+#include <rex/graphics/shader_storage_initialization.h>
+
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -69,7 +71,8 @@ class VulkanPipelineCache {
   bool Initialize();
   void Shutdown();
   void InitializeShaderStorage(const std::filesystem::path& cache_root, uint32_t title_id,
-                               bool blocking);
+                               bool blocking,
+                               std::shared_ptr<ShaderStorageInitialization> initialization = {});
   void ShutdownShaderStorage();
   void EndSubmission();
 
@@ -551,13 +554,11 @@ class VulkanPipelineCache {
   VkPipelineCache vk_pipeline_cache_ = VK_NULL_HANDLE;
   std::filesystem::path vk_pipeline_cache_path_;
   std::atomic<uint64_t> vk_pipeline_cache_creations_{0};
-  uint64_t vk_pipeline_cache_saved_creations_ = 0;
-  uint64_t vk_pipeline_cache_saved_time_ms_ = 0;
-  // The GPU commands thread's view: the creation count of the last save it
-  // requested (the save itself runs on the storage write thread).
-  uint64_t vk_pipeline_cache_requested_creations_ = 0;
+  std::atomic<uint64_t> vk_pipeline_cache_saved_creations_{0};
+  std::mutex vk_pipeline_cache_save_mutex_;
+  uint64_t vk_pipeline_cache_save_request_time_ms_ = 0;
   void LoadVkPipelineCache();
-  void SaveVkPipelineCache();
+  void SaveVkPipelineCache(const char* reason = "runtime", size_t completed = 0);
 
   // Shader storage output stream, for preload in the next emulator runs.
   FILE* shader_storage_file_ = nullptr;

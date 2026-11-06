@@ -47,6 +47,8 @@
 #include <rex/graphics/util/draw.h>
 #include <rex/graphics/vulkan/command_processor.h>
 #include <rex/graphics/vulkan/pipeline_cache.h>
+#include <rex/graphics/startup_pipeline_compilation.h>
+#include <rex/graphics/pipeline_cache_file.h>
 #include <rex/graphics/vulkan/shader.h>
 #include <rex/graphics/vulkan/shader_overrides.h>
 #include <rex/graphics/vulkan/shader_override_files.h>
@@ -477,9 +479,13 @@ bool VulkanPipelineCache::Initialize() {
   return true;
 }
 
-void VulkanPipelineCache::InitializeShaderStorage(const std::filesystem::path& cache_root,
-                                                  uint32_t title_id, bool blocking) {
+void VulkanPipelineCache::InitializeShaderStorage(
+    const std::filesystem::path& cache_root, uint32_t title_id, bool blocking,
+    std::shared_ptr<ShaderStorageInitialization> initialization) {
   ShutdownShaderStorage();
+  const auto cancelled = [&] { return initialization && initialization->cancel_requested(); };
+  if (cancelled())
+    return;
   {
     std::lock_guard<std::mutex> lock(creation_request_lock_);
     startup_loading_ = false;
@@ -493,6 +499,8 @@ void VulkanPipelineCache::InitializeShaderStorage(const std::filesystem::path& c
           "Failed to create the shareable shader storage directory, persistent "
           "shader storage will be disabled: {}",
           rex::path_to_utf8(shader_storage_shareable_root));
+      if (initialization)
+        initialization->Fail("Could not create the shader storage directory.");
       return;
     }
   }
@@ -531,6 +539,8 @@ void VulkanPipelineCache::InitializeShaderStorage(const std::filesystem::path& c
         "Failed to open the Vulkan pipeline description storage file for "
         "writing, persistent shader storage will be disabled: {}",
         rex::path_to_utf8(pipeline_storage_file_path));
+    if (initialization)
+      initialization->Fail("Could not open pipeline storage.");
     return;
   }
   pipeline_storage_file_flush_needed_ = false;
@@ -570,6 +580,8 @@ void VulkanPipelineCache::InitializeShaderStorage(const std::filesystem::path& c
       size_t pipeline_storage_skipped_unsupported_count = 0;
       size_t pipeline_storage_skipped_corrupted_count = 0;
       for (size_t i = 0; i < pipeline_storage_read_count; ++i) {
+        if (cancelled())
+          return;
         const PipelineStoredDescription pipeline_stored_description =
             pipeline_stored_descriptions[i];
         // Validate file integrity, stop and truncate the stream if data is
@@ -629,6 +641,8 @@ void VulkanPipelineCache::InitializeShaderStorage(const std::filesystem::path& c
     if (valid) {
       SpecializedStoredDescription stored;
       while (fread(&stored, sizeof(stored), 1, specialized_storage_file_)) {
+        if (cancelled())
+          return;
         if (XXH3_64bits(&stored.description, sizeof(stored) - sizeof(stored.hash)) !=
             stored.hash) {
           break;
@@ -652,6 +666,8 @@ void VulkanPipelineCache::InitializeShaderStorage(const std::filesystem::path& c
     header.version_swapped = pipeline_storage_version_swapped;
     fwrite(&header, sizeof(header), 1, specialized_storage_file_);
     for (const SpecializedStoredDescription& stored : specialized_stored_descriptions) {
+      if (cancelled())
+        return;
       fwrite(&stored, sizeof(stored), 1, specialized_storage_file_);
     }
     fflush(specialized_storage_file_);
@@ -670,6 +686,8 @@ void VulkanPipelineCache::InitializeShaderStorage(const std::filesystem::path& c
         "Failed to open the guest shader storage file for writing, persistent "
         "shader storage will be disabled: {}",
         rex::path_to_utf8(shader_storage_file_path));
+    if (initialization)
+      initialization->Fail("Could not open shader storage.");
     fclose(pipeline_storage_file_);
     pipeline_storage_file_ = nullptr;
     return;
@@ -758,8 +776,12 @@ void VulkanPipelineCache::InitializeShaderStorage(const std::filesystem::path& c
   // Translate shader modifications needed for stored pipelines.
   StopTranslationThread();
   for (const std::pair<uint64_t, uint64_t>& translation_needed : shader_translations_needed) {
+    if (cancelled())
+      return;
     auto shader_it = shaders_.find(translation_needed.first);
     if (shader_it == shaders_.end()) {
+      if (initialization)
+        initialization->Fail("A stored pipeline has no matching shader.");
       continue;
     }
     auto* shader = shader_it->second;
@@ -771,11 +793,17 @@ void VulkanPipelineCache::InitializeShaderStorage(const std::filesystem::path& c
         shader->GetOrCreateTranslation(translation_needed.second, &translation_is_new));
     if (!translation->is_translated() &&
         !TranslateAnalyzedShader(*shader_translator_, *translation)) {
+      if (initialization)
+        initialization->Fail("Could not translate a startup shader. See the game log.");
       if (translation_is_new) {
         shader->DestroyTranslation(translation_needed.second);
       }
     }
   }
+
+  if (cancelled() || (initialization && initialization->GetSnapshot().phase ==
+                                            ShaderStorageInitialization::Phase::kFailed))
+    return;
 
   // The driver's cache first, so the stored pipelines below come from it.
   shader_storage_cache_root_ = cache_root;
@@ -795,6 +823,8 @@ void VulkanPipelineCache::InitializeShaderStorage(const std::filesystem::path& c
   std::vector<PipelineCreationArguments> pipeline_creations;
   pipeline_creations.reserve(pipeline_descriptions.size());
   for (const PipelineDescription& pipeline_description : pipeline_descriptions) {
+    if (cancelled())
+      return;
 
     auto find_it = pipelines_.find(pipeline_description);
     if (find_it != pipelines_.end()) {
@@ -805,6 +835,8 @@ void VulkanPipelineCache::InitializeShaderStorage(const std::filesystem::path& c
     if (!TryGetPipelineCreationArgumentsForDescription(pipeline_description, &pipeline,
                                                        creation_arguments)) {
       pipelines_.erase(pipeline_description);
+      if (initialization)
+        initialization->Fail("Could not prepare a startup pipeline. See the game log.");
       continue;
     }
     uint32_t bound_rts = 0;
@@ -825,6 +857,8 @@ void VulkanPipelineCache::InitializeShaderStorage(const std::filesystem::path& c
     pipeline_creations.push_back(creation_arguments);
   }
   for (const SpecializedStoredDescription& stored : specialized_stored_descriptions) {
+    if (cancelled())
+      return;
     SpecializedKey key{stored.description, {}};
     std::memcpy(key.texture_signs.data(), stored.texture_signs, sizeof(stored.texture_signs));
     auto [entry, inserted] = specialized_pipelines_.try_emplace(key);
@@ -837,6 +871,8 @@ void VulkanPipelineCache::InitializeShaderStorage(const std::filesystem::path& c
     if (!TryGetPipelineCreationArgumentsForDescription(stored.description, entry->second.get(),
                                                        creation_arguments)) {
       specialized_pipelines_.erase(entry);
+      if (initialization)
+        initialization->Fail("Could not prepare a specialized startup pipeline.");
       continue;
     }
     creation_arguments.specialize_texture_signs = true;
@@ -844,6 +880,11 @@ void VulkanPipelineCache::InitializeShaderStorage(const std::filesystem::path& c
     pipeline_creations.push_back(creation_arguments);
   }
 
+  if (cancelled() || (initialization && initialization->GetSnapshot().phase ==
+                                            ShaderStorageInitialization::Phase::kFailed))
+    return;
+  const bool background =
+      !pipeline_creations.empty() && REXCVAR_GET(vulkan_pipeline_prewarm_background);
   if (!pipeline_creations.empty() && REXCVAR_GET(vulkan_pipeline_prewarm_background)) {
     StartBackgroundPrewarm(std::move(pipeline_creations));
     pipeline_creations.clear();
@@ -874,44 +915,34 @@ void VulkanPipelineCache::InitializeShaderStorage(const std::filesystem::path& c
     }
     creation_thread_count = std::min(creation_thread_count, pipeline_creations.size());
 
-    std::atomic<size_t> next_creation_index(0);
-    std::atomic<size_t> created_pipeline_count(0);
-    auto creation_worker = [this, &pipeline_creations, &next_creation_index,
-                            &created_pipeline_count]() {
-      while (true) {
-        size_t creation_index = next_creation_index.fetch_add(1);
-        if (creation_index >= pipeline_creations.size()) {
-          break;
-        }
-        if (EnsurePipelineCreated(pipeline_creations[creation_index])) {
-          created_pipeline_count.fetch_add(1);
-        }
-      }
-    };
-
-    if (creation_thread_count <= 1) {
-      creation_worker();
-    } else {
-      std::vector<std::unique_ptr<rex::thread::Thread>> creation_threads;
-      creation_threads.reserve(creation_thread_count);
-      for (size_t i = 0; i < creation_thread_count; ++i) {
-        std::unique_ptr<rex::thread::Thread> creation_thread =
-            rex::thread::Thread::Create({}, creation_worker);
-        assert_not_null(creation_thread);
-        creation_thread->set_name("Vulkan Pipelines");
-        creation_threads.push_back(std::move(creation_thread));
-      }
-      for (const auto& creation_thread : creation_threads) {
-        rex::thread::Wait(creation_thread.get(), false);
-      }
-    }
-
+    ShaderStorageInitialization local_initialization;
+    auto& progress = initialization ? *initialization : local_initialization;
+    RunStartupPipelineCompilation(
+        pipeline_creations.size(), creation_thread_count, progress,
+        [&](size_t index) { return EnsurePipelineCreated(pipeline_creations[index]); },
+        [&] {
+          const auto snapshot = progress.GetSnapshot();
+          SaveVkPipelineCache(snapshot.phase == ShaderStorageInitialization::Phase::kSaving
+                                  ? "startup completion"
+                                  : "startup periodic",
+                              snapshot.completed);
+        });
     REXGPU_INFO("Created {} graphics pipelines from Vulkan storage ({} requested)",
-                created_pipeline_count.load(), pipeline_creations.size());
+                progress.GetSnapshot().completed, pipeline_creations.size());
+
     {
       std::lock_guard<std::mutex> lock(creation_request_lock_);
       startup_loading_ = false;
     }
+  }
+
+  if (cancelled() || (initialization && initialization->GetSnapshot().phase ==
+                                            ShaderStorageInitialization::Phase::kFailed))
+    return;
+  if (!background && pipeline_creations.empty()) {
+    if (initialization)
+      initialization->SetTotal(0);
+    SaveVkPipelineCache("startup completion");
   }
 
   // If any pipeline descriptions were corrupted (or the whole file has excess
@@ -1114,50 +1145,46 @@ void VulkanPipelineCache::LoadVkPipelineCache() {
   }
   vk_pipeline_cache_creations_ = 0;
   vk_pipeline_cache_saved_creations_ = 0;
-  vk_pipeline_cache_saved_time_ms_ = rex::chrono::Clock::QueryHostUptimeMillis();
+  vk_pipeline_cache_save_request_time_ms_ = rex::chrono::Clock::QueryHostUptimeMillis();
   REXGPU_INFO("Vulkan pipeline cache: {} bytes loaded from {}", data.size(),
               rex::path_to_utf8(vk_pipeline_cache_path_));
 }
 
-void VulkanPipelineCache::SaveVkPipelineCache() {
-  if (vk_pipeline_cache_ == VK_NULL_HANDLE || vk_pipeline_cache_path_.empty()) {
+void VulkanPipelineCache::SaveVkPipelineCache(const char* reason, size_t completed) {
+  std::lock_guard lock(vk_pipeline_cache_save_mutex_);
+  if (vk_pipeline_cache_ == VK_NULL_HANDLE || vk_pipeline_cache_path_.empty())
     return;
-  }
-  const uint64_t creations = vk_pipeline_cache_creations_.load(std::memory_order_relaxed);
-  if (creations == vk_pipeline_cache_saved_creations_) {
+  const uint64_t creations = vk_pipeline_cache_creations_.load(std::memory_order_acquire);
+  if (creations == vk_pipeline_cache_saved_creations_.load(std::memory_order_relaxed))
     return;
-  }
   const ui::vulkan::VulkanDevice* vulkan_device = command_processor_.GetVulkanDevice();
   const auto& dfn = vulkan_device->functions();
+  std::vector<uint8_t> data;
+  VkResult result = VK_INCOMPLETE;
   size_t size = 0;
-  if (dfn.vkGetPipelineCacheData(vulkan_device->device(), vk_pipeline_cache_, &size, nullptr) !=
-          VK_SUCCESS ||
-      !size) {
-    return;
-  }
-  std::vector<uint8_t> data(size);
-  if (dfn.vkGetPipelineCacheData(vulkan_device->device(), vk_pipeline_cache_, &size,
-                                 data.data()) != VK_SUCCESS) {
-    return;
-  }
-  // Write beside, then replace, so a process killed mid-write (Android does)
-  // leaves the previous cache.
-  auto temporary = vk_pipeline_cache_path_;
-  temporary += ".tmp";
-  if (FILE* file = rex::filesystem::OpenFile(temporary, "wb")) {
-    const bool written = fwrite(data.data(), 1, size, file) == size;
-    fclose(file);
-    std::error_code error;
-    if (written) {
-      std::filesystem::rename(temporary, vk_pipeline_cache_path_, error);
-    }
-    if (!written || error) {
-      std::filesystem::remove(temporary, error);
+  for (size_t attempt = 0; attempt != 3 && result == VK_INCOMPLETE; ++attempt) {
+    result =
+        dfn.vkGetPipelineCacheData(vulkan_device->device(), vk_pipeline_cache_, &size, nullptr);
+    if (result != VK_SUCCESS || !size)
       return;
-    }
+    data.resize(size);
+    result =
+        dfn.vkGetPipelineCacheData(vulkan_device->device(), vk_pipeline_cache_, &size, data.data());
+    if (result != VK_SUCCESS && result != VK_INCOMPLETE)
+      return;
   }
-  vk_pipeline_cache_saved_creations_ = creations;
-  vk_pipeline_cache_saved_time_ms_ = rex::chrono::Clock::QueryHostUptimeMillis();
+  data.resize(size);
+  if (data.empty())
+    return;
+  std::string error;
+  if (!WritePipelineCacheFile(vk_pipeline_cache_path_, data, &error)) {
+    REXGPU_WARN("Vulkan pipeline cache save failed: {}", error);
+    return;
+  }
+  if (result == VK_SUCCESS)
+    vk_pipeline_cache_saved_creations_.store(creations, std::memory_order_release);
+  REXGPU_INFO("Vulkan pipeline cache: saved {} bytes ({}, {} completed, complete={})", size, reason,
+              completed, result == VK_SUCCESS);
 }
 
 void VulkanPipelineCache::EndSubmission() {
@@ -1169,10 +1196,10 @@ void VulkanPipelineCache::EndSubmission() {
   const uint64_t vk_pipeline_cache_creations =
       vk_pipeline_cache_creations_.load(std::memory_order_relaxed);
   if (vk_pipeline_cache_ != VK_NULL_HANDLE &&
-      vk_pipeline_cache_creations != vk_pipeline_cache_requested_creations_ &&
-      rex::chrono::Clock::QueryHostUptimeMillis() - vk_pipeline_cache_saved_time_ms_ >
+      vk_pipeline_cache_creations !=
+          vk_pipeline_cache_saved_creations_.load(std::memory_order_acquire) &&
+      rex::chrono::Clock::QueryHostUptimeMillis() - vk_pipeline_cache_save_request_time_ms_ >
           30000) {
-    vk_pipeline_cache_requested_creations_ = vk_pipeline_cache_creations;
     if (storage_write_thread_) {
       {
         std::lock_guard<std::mutex> lock(storage_write_request_lock_);
@@ -1182,7 +1209,7 @@ void VulkanPipelineCache::EndSubmission() {
     } else {
       SaveVkPipelineCache();
     }
-    vk_pipeline_cache_saved_time_ms_ = rex::chrono::Clock::QueryHostUptimeMillis();
+    vk_pipeline_cache_save_request_time_ms_ = rex::chrono::Clock::QueryHostUptimeMillis();
   }
   if (shader_storage_file_flush_needed_ || pipeline_storage_file_flush_needed_) {
     {
@@ -4640,7 +4667,7 @@ bool VulkanPipelineCache::EnsurePipelineCreated(const PipelineCreationArguments&
   if (log_statistics && create_result == VK_SUCCESS) {
     LogPipelineStatistics(pipeline, creation_arguments);
   }
-  vk_pipeline_cache_creations_.fetch_add(1, std::memory_order_relaxed);
+  vk_pipeline_cache_creations_.fetch_add(1, std::memory_order_release);
   if (create_result != VK_SUCCESS) {
     uint64_t ps_hash = creation_arguments.pixel_shader
                            ? creation_arguments.pixel_shader->shader().ucode_data_hash()

@@ -11,6 +11,8 @@
 
 #pragma once
 
+#include <rex/graphics/shader_storage_initialization.h>
+
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -60,8 +62,9 @@ class D3D12CommandProcessor : public CommandProcessor {
   void ClearCaches() override;
   void InvalidateGpuMemory() override;
 
-  void InitializeShaderStorage(const std::filesystem::path& cache_root, uint32_t title_id,
-                               bool blocking) override;
+  void InitializeShaderStorage(
+      const std::filesystem::path& cache_root, uint32_t title_id, bool blocking,
+      std::shared_ptr<ShaderStorageInitialization> initialization = {}) override;
 
   ui::d3d12::D3D12Provider& GetD3D12Provider() const {
     return *static_cast<ui::d3d12::D3D12Provider*>(graphics_system_->provider());

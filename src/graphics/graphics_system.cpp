@@ -621,35 +621,52 @@ bool GraphicsSystem::fh1_shadow_mask(uint32_t* base, uint32_t* length,
   return command_processor_ && command_processor_->fh1_shadow_mask(base, length, resolves);
 }
 
-void GraphicsSystem::InitializeShaderStorage(const std::filesystem::path& cache_root,
-                                             uint32_t title_id, bool blocking) {
-  // A requested frame replay runs once the title's shader storage is ready.
-  struct ReplayAfterStorage {
-    CommandProcessor* command_processor;
-    ~ReplayAfterStorage() {
-      command_processor->CallInThread(
-          [command_processor = command_processor] { command_processor->RunRequestedFrameReplay(); });
+void GraphicsSystem::InitializeShaderStorage(
+    const std::filesystem::path& cache_root, uint32_t title_id, bool blocking,
+    std::shared_ptr<ShaderStorageInitialization> initialization) {
+  const auto initialize = [this, cache_root, title_id, blocking, initialization] {
+    try {
+      if (REXCVAR_GET(store_shaders) && (!initialization || !initialization->cancel_requested())) {
+        command_processor_->InitializeShaderStorage(cache_root, title_id, blocking, initialization);
+      }
+      if (initialization)
+        initialization->Finish();
+    } catch (const std::exception& error) {
+      REXGPU_ERROR("Shader storage initialization failed: {}", error.what());
+      if (initialization)
+        initialization->Fail(error.what());
+    } catch (...) {
+      REXGPU_ERROR("Shader storage initialization failed");
+      if (initialization)
+        initialization->Fail("Shader storage initialization failed.");
     }
-  } replay_after_storage{command_processor_.get()};
-  if (!REXCVAR_GET(store_shaders)) {
-    return;
-  }
+  };
   if (blocking) {
     if (command_processor_->is_paused()) {
-      // Safe to run on any thread while the command processor is paused, no
-      // race condition.
-      command_processor_->InitializeShaderStorage(cache_root, title_id, true);
+      initialize();
     } else {
       rex::thread::Fence fence;
-      command_processor_->CallInThread([this, cache_root, title_id, &fence]() {
-        command_processor_->InitializeShaderStorage(cache_root, title_id, true);
+      command_processor_->CallInThread([initialize, &fence] {
+        initialize();
         fence.Signal();
       });
       fence.Wait();
     }
+    if (!initialization ||
+        initialization->GetSnapshot().phase == ShaderStorageInitialization::Phase::kSucceeded) {
+      command_processor_->CallInThread([this, initialization] {
+        if (!initialization || !initialization->cancel_requested()) {
+          command_processor_->RunRequestedFrameReplay();
+        }
+      });
+    }
   } else {
-    command_processor_->CallInThread([this, cache_root, title_id]() {
-      command_processor_->InitializeShaderStorage(cache_root, title_id, false);
+    command_processor_->CallInThread([this, initialize, initialization] {
+      initialize();
+      if (!initialization ||
+          initialization->GetSnapshot().phase == ShaderStorageInitialization::Phase::kSucceeded) {
+        command_processor_->RunRequestedFrameReplay();
+      }
     });
   }
 }
