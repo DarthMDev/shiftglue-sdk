@@ -81,7 +81,8 @@ class WavDecoder final : public Decoder {
     bool have_format = false;
     while (at + 8 <= data_.size()) {
       const uint32_t size = U32(&data_[at + 4]);
-      if (size > data_.size() - at - 8) return false;
+      // Streaming writers and truncated copies overstate the data chunk; it is clamped below.
+      if (size > data_.size() - at - 8 && std::memcmp(&data_[at], "data", 4)) return false;
       const uint8_t* body = &data_[at + 8];
       if (!std::memcmp(&data_[at], "fmt ", 4) && size >= 16 && at + 8 + 16 <= data_.size()) {
         format_ = U16(body);

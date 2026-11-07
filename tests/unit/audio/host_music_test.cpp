@@ -318,3 +318,18 @@ TEST_CASE("A finite music file finishes instead of advancing its own playlist", 
   CHECK_FALSE(player.GetStatus().ready);
   CHECK(player.GetStatus().title == "a");
 }
+
+TEST_CASE("Host music plays a WAV whose data chunk overstates its size", "[audio][host_music]") {
+  TempFolder folder;
+  const auto path = folder.path / "streamed.wav";
+  WriteWav(path, 1, 1, 22050, 16, std::vector<uint8_t>(200, 0));
+  {
+    std::fstream file(path, std::ios::binary | std::ios::in | std::ios::out);
+    file.seekp(40);
+    file.write("\xFF\xFF\xFF\xFF", 4);
+  }
+  int rate = 0;
+  const auto samples = HostMusicPlayer::DecodeForTest(path, rate);
+  CHECK(rate == 22050);
+  CHECK(samples.size() == 200);
+}
