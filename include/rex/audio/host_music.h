@@ -27,6 +27,7 @@ bool HostMusicHasTheMusic();
 class HostMusicPlayer {
  public:
   struct Status {
+    bool ready = false;
     bool playing = false;
     bool paused = false;
     size_t index = 0;   // into tracks
@@ -34,6 +35,7 @@ class HostMusicPlayer {
     std::string title;  // the current file's name without its extension
   };
 
+  HostMusicPlayer();
   static HostMusicPlayer& Get();
 
   // The files under `folder` that can be played (.mp3 where the build's
@@ -43,7 +45,9 @@ class HostMusicPlayer {
 
   // Scans `folder` and starts its first track (or a random one when
   // shuffling). False when it holds nothing to play.
-  bool Play(const std::filesystem::path& folder);
+  bool Play(const std::filesystem::path& folder, bool paused = false);
+  bool PlayFile(const std::filesystem::path& file, bool paused = false,
+                float fade_seconds = 0.0f, float silence_seconds = 0.0f);
   void Stop();
   void SetPaused(bool paused);
   void Next();
@@ -62,12 +66,15 @@ class HostMusicPlayer {
 
   // Decodes a whole file to interleaved stereo float at its own rate, for
   // tests. Empty when it cannot be decoded.
-  static std::vector<float> DecodeForTest(const std::filesystem::path& file, int& sample_rate);
+  static std::vector<float> DecodeForTest(const std::filesystem::path& file, int& sample_rate,
+                                          float fade_seconds = 0.0f, float silence_seconds = 0.0f);
 
   ~HostMusicPlayer();
 
  private:
-  HostMusicPlayer();
+  explicit HostMusicPlayer(bool system_player);
+  bool Start(std::vector<std::filesystem::path> tracks, bool paused, bool repeat,
+             float fade_seconds, float silence_seconds);
   struct Impl;
   std::unique_ptr<Impl> impl_;
 };
