@@ -177,6 +177,10 @@ struct RecompilerConfig {
   /// double fma rounded to single. Results can differ from the double form by
   /// its double-rounding error (one single-precision ulp, rarely).
   std::vector<uint32_t> singlePrecisionFunctions;
+  std::vector<uint32_t> exactSingleFmaFunctions;
+  bool isExactSingleFmaFunction(uint32_t address) const {
+    return std::binary_search(exactSingleFmaFunctions.begin(), exactSingleFmaFunctions.end(), address);
+  }
   bool isRegisterLocalsFunction(uint32_t address) const {
     return std::binary_search(registerLocalsFunctions.begin(), registerLocalsFunctions.end(),
                               address);

@@ -2579,6 +2579,7 @@ std::string FunctionNode::emitCpp(const EmitContext& ctx, bool allowSpecializati
     }
   };
   RecompilerLocalVariables localVariables;
+  localVariables.exactSingleFma = ctx.exactSingleFma;
 
   // NN-5.1 per-function specialisation. Reference copies and the save/restore
   // helpers are never specialised; a listed function that cannot keep its
@@ -2815,7 +2816,7 @@ std::string FunctionNode::emitCpp(const EmitContext& ctx, bool allowSpecializati
         }
         if (ctx.config.foldRodataLoads)
           trackRegisters(insn);
-        if (localVariables.singlePrecision)
+        if (localVariables.singlePrecision || localVariables.exactSingleFma)
           trackSingles(insn);
         if (ctx.referenceBlocked) {
           // A reference copy must be rolled back by its store log alone: no
@@ -3217,9 +3218,22 @@ std::string FunctionNode::emitCpp(const EmitContext& ctx, bool allowSpecializati
     out += body;
   }
 
-  if (!ieeeCopy.empty())
-    return ieeeCopy + "\n" + out;
-  return out;
+  std::string exactCopy;
+  // A pre-existing float-FMA specialization has different rounding; preserve it.
+  if (allowSpecialization && ctx.namePrefix.empty() && !ctx.oracleMembers &&
+      ctx.config.isExactSingleFmaFunction(static_cast<uint32_t>(base())) &&
+      !ctx.config.isSinglePrecisionFunction(static_cast<uint32_t>(base()))) {
+    EmitContext exactCtx = ctx;
+    exactCtx.namePrefix = "exact_fma_";
+    exactCtx.exactSingleFma = true;
+    exactCtx.referenceBlocked = nullptr;
+    exactCopy = emitCpp(exactCtx, false);
+    const std::string dispatch = fmt::format(
+        "\tif (rex::ppc::g_exact_single_fma.load(std::memory_order_relaxed)) [[unlikely]] {{ REX_TAIL_CALL(exact_fma_{}); }}\n", name);
+    const size_t prologue = out.find("\tREX_FUNC_PROLOGUE();\n");
+    out.insert(prologue + std::string_view("\tREX_FUNC_PROLOGUE();\n").size(), dispatch);
+  }
+  return exactCopy + ieeeCopy + out;
 }
 
 void FunctionGraph::addCodeBuffer(uint32_t baseAddress, const uint8_t* data, size_t size) {

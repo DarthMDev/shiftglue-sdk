@@ -19,6 +19,7 @@ add_executable(unit_tests
     codegen/resume_template_test.cpp
     ppc/import_function_test.cpp
     ppc/stack_test.cpp
+    ppc/fma_test.cpp
     ppc/vector_math_test.cpp
     system/guest_path_test.cpp
     system/achievement_manager_test.cpp

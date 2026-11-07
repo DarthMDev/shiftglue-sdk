@@ -86,6 +86,18 @@ std::vector<Fn> MakeImage() {
 
   // A VMX operation (guest flush-to-zero) next to scalar FP.
   fns.push_back(MakeFn("vmx_and_scalar", {kVaddfp, kFaddF2, kBlr}));
+  Fn variants = MakeFn("fma_variants", {kFmaddsF1});
+  for (uint32_t op : {59u, 63u}) for (uint32_t xo : {29u, 28u, 31u, 30u}) {
+    variants.words.push_back(kLfsF1);
+    variants.words.push_back((kFmaddsF1 & 0x03FFFFC1u) | (op << 26) | (xo << 1));
+  }
+  variants.words.push_back(kBlr);
+  fns.push_back(variants);
+  Fn unknown = MakeFn("fma_unknown", {kLfsF1, kFmaddsF1, 0, kFmaddsF1, kBlr});
+  unknown.branches[2] = {"leaf", true};
+  fns.push_back(unknown);
+  fns.push_back(MakeFn("fma_label", {kLfsF1, 0x48000004, kFmaddsF1, kBlr}));
+  fns.push_back(MakeFn("fma_hook", {kLfsF1, kFmaddsF1, kBlr}));
   return fns;
 }
 
@@ -96,7 +108,7 @@ struct Fixture {
   std::optional<CodegenContext> ctx;
   std::map<std::string, uint32_t> addressOf;
 
-  explicit Fixture(const std::vector<std::string>& specialised) : fns(MakeImage()) {
+  explicit Fixture(const std::vector<std::string>& specialised, bool exact = false) : fns(MakeImage()) {
     uint32_t address = kBase;
     for (auto& fn : fns) {
       fn.address = address;
@@ -120,6 +132,15 @@ struct Fixture {
 
     RecompilerConfig config;
     config.projectName = "testproj";
+    if (exact) {
+      for (const auto& fn : fns)
+        if (fn.name == "fp_call" || fn.name.starts_with("fma_"))
+          config.exactSingleFmaFunctions.push_back(fn.address);
+      MidAsmHook hook;
+      hook.name = "ChangeFprs";
+      hook.context = true;
+      config.midAsmHooks.emplace(addressOf.at("fma_hook") + 4, hook);
+    }
     config.interiorResume = false;
     for (const auto& name : specialised) {
       config.registerLocalsFunctions.push_back(addressOf.at(name));
@@ -294,13 +315,15 @@ TEST_CASE("the specialisation lists parse, sort and deduplicate", "[codegen][reg
       toml::parse("file_path = \"default.xex\"\n"
                   "register_locals_functions = [0x82000010, 0x82000008, 0x82000010]\n"
                   "fixed_fp_mode_functions = [0x82000020]\n"
-                  "single_precision_functions = [0x82000030, 0x82000030]\n"),
+                  "single_precision_functions = [0x82000030, 0x82000030]\n"
+                  "exact_single_fma_functions = [0x82000050, 0x82000040, 0x82000050]\n"),
       "."));
   CHECK(config.registerLocalsFunctions == std::vector<uint32_t>{0x82000008, 0x82000010});
   CHECK(config.isRegisterLocalsFunction(0x82000010));
   CHECK_FALSE(config.isRegisterLocalsFunction(0x82000020));
   CHECK(config.isFixedFpModeFunction(0x82000020));
   CHECK(config.singlePrecisionFunctions == std::vector<uint32_t>{0x82000030});
+  CHECK(config.exactSingleFmaFunctions == std::vector<uint32_t>{0x82000040, 0x82000050});
 }
 
 TEST_CASE("the reference log measures stored floats and skips unchecked stores",
@@ -364,4 +387,58 @@ TEST_CASE("the reference log compares each byte against its newest store",
   CHECK(diff.max_ulps == 1.0);
   CHECK(diff.first != nullptr);
   CHECK(diff.first->size == 16);
+}
+
+TEST_CASE("Exact FMA dispatch retains an unchanged original body", "[codegen][exact_fma]") {
+  Fixture baseline({});
+  Fixture selected({}, true);
+  const std::string code = selected.emit("fp_call");
+  const std::string original = Function(code, "fp_call");
+  const std::string candidate = Function(code, "exact_fma_fp_call");
+  CHECK(Has(original, "g_exact_single_fma.load"));
+  CHECK(Has(original, "std::fma("));
+  CHECK_FALSE(Has(original, "FmaFromSingles("));
+  std::string unchanged = original;
+  const size_t dispatch = unchanged.find("\tif (rex::ppc::g_exact_single_fma.load");
+  REQUIRE(dispatch != std::string::npos);
+  unchanged.erase(dispatch, unchanged.find('\n', dispatch) - dispatch + 1);
+  CHECK(unchanged == Function(baseline.emit("fp_call"), "fp_call"));
+  CHECK(Has(candidate, "FmaFromSingles("));
+  CHECK_FALSE(Has(candidate, "g_exact_single_fma.load"));
+  CHECK_FALSE(Has(selected.emit("leaf"), "exact_fma_"));
+  CHECK_FALSE(Has(baseline.emit("fp_call"), "exact_fma_"));
+}
+
+TEST_CASE("Exact FMA proof stops at calls labels and hooks", "[codegen][exact_fma]") {
+  Fixture fx({}, true);
+  const auto call = Function(fx.emit("fma_unknown"), "exact_fma_fma_unknown");
+  CHECK(Count(call, "FmaFromSingles(") == 1);
+  CHECK(Count(call, "FmaWithSingleOperands(") == 1);
+  const auto label = Function(fx.emit("fma_label"), "exact_fma_fma_label");
+  CHECK_FALSE(Has(label, "FmaFromSingles("));
+  CHECK(Has(label, "FmaWithSingleOperands("));
+  const auto hook = Function(fx.emit("fma_hook"), "exact_fma_fma_hook");
+  CHECK_FALSE(Has(hook, "FmaFromSingles("));
+  CHECK(Has(hook, "FmaWithSingleOperands("));
+}
+
+TEST_CASE("Exact FMA preserves variant rounding and negation placement", "[codegen][exact_fma]") {
+  Fixture fx({}, true);
+  const auto candidate = Function(fx.emit("fma_variants"), "exact_fma_fma_variants");
+  CHECK(Count(candidate, "FmaFromSingles(") == 8);
+  CHECK(Count(candidate, "FmaWithSingleOperands(") == 1);
+  for (const std::string prefix : {"", "-", "double(float(", "double(float(-"}) {
+    for (const std::string sign : {"", "-"}) {
+      const std::string suffix = prefix.starts_with("double") ? "));" : ";";
+      CHECK(Has(candidate, " = " + prefix + "rex::ppc::FmaFromSingles(ctx.f1.f64, ctx.f1.f64, " +
+                sign + "ctx.f1.f64)" + suffix));
+    }
+  }
+}
+
+TEST_CASE("Exact FMA does not override an existing float FMA specialization", "[codegen][exact_fma]") {
+  Fixture fx({"fp_call"}, true);
+  const auto code = fx.emit("fp_call");
+  CHECK_FALSE(Has(code, "exact_fma_"));
+  CHECK(Has(code, "std::fma(float("));
 }

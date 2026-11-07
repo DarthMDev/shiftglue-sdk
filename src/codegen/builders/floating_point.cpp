@@ -216,8 +216,23 @@ static bool emit_single_fma(BuilderContext& ctx, bool negate, bool negate_b) {
   return true;
 }
 
+static bool emit_exact_single_fma(BuilderContext& ctx, bool single, bool negate, bool negate_b) {
+  if (!ctx.locals.exactSingleFma)
+    return false;
+  const auto& ops = ctx.insn.operands;
+  const bool proven = ctx.locals.isExactSingle(ops[1]) && ctx.locals.isExactSingle(ops[2]) &&
+                      ctx.locals.isExactSingle(ops[3]);
+  ctx.println("\t{}.f64 = {}{}rex::ppc::{}({}.f64, {}.f64, {}{}.f64){};",
+              ctx.f(ops[0]), single ? "double(float(" : "", negate ? "-" : "",
+              proven ? "FmaFromSingles" : "FmaWithSingleOperands", ctx.f(ops[1]), ctx.f(ops[2]),
+              negate_b ? "-" : "", ctx.f(ops[3]), single ? "))" : "");
+  return true;
+}
+
 bool build_fmadd(BuilderContext& ctx) {
   ctx.emit_set_flush_mode(false);
+  if (emit_exact_single_fma(ctx, false, false, false))
+    return true;
   ctx.println("\t{}.f64 = std::fma({}.f64, {}.f64, {}.f64);", ctx.f(ctx.insn.operands[0]),
               ctx.f(ctx.insn.operands[1]), ctx.f(ctx.insn.operands[2]),
               ctx.f(ctx.insn.operands[3]));
@@ -226,6 +241,8 @@ bool build_fmadd(BuilderContext& ctx) {
 
 bool build_fmadds(BuilderContext& ctx) {
   ctx.emit_set_flush_mode(false);
+  if (emit_exact_single_fma(ctx, true, false, false))
+    return true;
   if (emit_single_fma(ctx, false, false))
     return true;
   ctx.println("\t{}.f64 = double(float(std::fma({}.f64, {}.f64, {}.f64)));",
@@ -236,6 +253,8 @@ bool build_fmadds(BuilderContext& ctx) {
 
 bool build_fmsub(BuilderContext& ctx) {
   ctx.emit_set_flush_mode(false);
+  if (emit_exact_single_fma(ctx, false, false, true))
+    return true;
   ctx.println("\t{}.f64 = std::fma({}.f64, {}.f64, -{}.f64);", ctx.f(ctx.insn.operands[0]),
               ctx.f(ctx.insn.operands[1]), ctx.f(ctx.insn.operands[2]),
               ctx.f(ctx.insn.operands[3]));
@@ -244,6 +263,8 @@ bool build_fmsub(BuilderContext& ctx) {
 
 bool build_fmsubs(BuilderContext& ctx) {
   ctx.emit_set_flush_mode(false);
+  if (emit_exact_single_fma(ctx, true, false, true))
+    return true;
   if (emit_single_fma(ctx, false, true))
     return true;
   ctx.println("\t{}.f64 = double(float(std::fma({}.f64, {}.f64, -{}.f64)));",
@@ -254,6 +275,8 @@ bool build_fmsubs(BuilderContext& ctx) {
 
 bool build_fnmadd(BuilderContext& ctx) {
   ctx.emit_set_flush_mode(false);
+  if (emit_exact_single_fma(ctx, false, true, false))
+    return true;
   ctx.println("\t{}.f64 = -std::fma({}.f64, {}.f64, {}.f64);", ctx.f(ctx.insn.operands[0]),
               ctx.f(ctx.insn.operands[1]), ctx.f(ctx.insn.operands[2]),
               ctx.f(ctx.insn.operands[3]));
@@ -262,6 +285,8 @@ bool build_fnmadd(BuilderContext& ctx) {
 
 bool build_fnmadds(BuilderContext& ctx) {
   ctx.emit_set_flush_mode(false);
+  if (emit_exact_single_fma(ctx, true, true, false))
+    return true;
   if (emit_single_fma(ctx, true, false))
     return true;
   ctx.println("\t{}.f64 = double(float(-std::fma({}.f64, {}.f64, {}.f64)));",
@@ -272,6 +297,8 @@ bool build_fnmadds(BuilderContext& ctx) {
 
 bool build_fnmsub(BuilderContext& ctx) {
   ctx.emit_set_flush_mode(false);
+  if (emit_exact_single_fma(ctx, false, true, true))
+    return true;
   ctx.println("\t{}.f64 = -std::fma({}.f64, {}.f64, -{}.f64);", ctx.f(ctx.insn.operands[0]),
               ctx.f(ctx.insn.operands[1]), ctx.f(ctx.insn.operands[2]),
               ctx.f(ctx.insn.operands[3]));
@@ -280,6 +307,8 @@ bool build_fnmsub(BuilderContext& ctx) {
 
 bool build_fnmsubs(BuilderContext& ctx) {
   ctx.emit_set_flush_mode(false);
+  if (emit_exact_single_fma(ctx, true, true, true))
+    return true;
   if (emit_single_fma(ctx, true, true))
     return true;
   ctx.println("\t{}.f64 = double(float(-std::fma({}.f64, {}.f64, -{}.f64)));",
