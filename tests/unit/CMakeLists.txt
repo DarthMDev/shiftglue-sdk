@@ -99,6 +99,12 @@ target_sources(unit_tests PRIVATE
     ${PROJECT_SOURCE_DIR}/src/graphics/pipeline/texture/cache.cpp
 )
 
+if(APPLE)
+    # Source file properties are per directory; repeat src/graphics' libc++ jthread flag here.
+    set_source_files_properties(${PROJECT_SOURCE_DIR}/src/graphics/startup_pipeline_compilation.cpp
+        PROPERTIES COMPILE_OPTIONS "-fexperimental-library")
+endif()
+
 target_include_directories(unit_tests PRIVATE
     ${PROJECT_SOURCE_DIR}/include
     ${PROJECT_SOURCE_DIR}/src
