@@ -3227,11 +3227,17 @@ std::string FunctionNode::emitCpp(const EmitContext& ctx, bool allowSpecializati
     exactCtx.namePrefix = "exact_fma_";
     exactCtx.exactSingleFma = true;
     exactCtx.referenceBlocked = nullptr;
-    exactCopy = emitCpp(exactCtx, false);
-    const std::string dispatch = fmt::format(
-        "\tif (rex::ppc::g_exact_single_fma.load(std::memory_order_relaxed)) [[unlikely]] {{ REX_TAIL_CALL(exact_fma_{}); }}\n", name);
-    const size_t prologue = out.find("\tREX_FUNC_PROLOGUE();\n");
-    out.insert(prologue + std::string_view("\tREX_FUNC_PROLOGUE();\n").size(), dispatch);
+    constexpr std::string_view kPrologue = "\tREX_FUNC_PROLOGUE();\n";
+    const size_t prologue = out.find(kPrologue);
+    if (prologue == std::string::npos) {
+      REXCODEGEN_WARN("exact_single_fma_functions: 0x{:08X} has no prologue to dispatch from",
+                      static_cast<uint32_t>(base()));
+    } else {
+      exactCopy = emitCpp(exactCtx, false);
+      const std::string dispatch = fmt::format(
+          "\tif (rex::ppc::g_exact_single_fma.load(std::memory_order_relaxed)) [[unlikely]] {{ REX_TAIL_CALL(exact_fma_{}); }}\n", name);
+      out.insert(prologue + kPrologue.size(), dispatch);
+    }
   }
   return exactCopy + ieeeCopy + out;
 }

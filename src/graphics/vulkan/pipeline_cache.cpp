@@ -881,7 +881,7 @@ void VulkanPipelineCache::InitializeShaderStorage(
     return;
   const bool background =
       !pipeline_creations.empty() && REXCVAR_GET(vulkan_pipeline_prewarm_background);
-  if (!pipeline_creations.empty() && REXCVAR_GET(vulkan_pipeline_prewarm_background)) {
+  if (background) {
     StartBackgroundPrewarm(std::move(pipeline_creations));
     pipeline_creations.clear();
   }
