@@ -87,6 +87,7 @@ REXCVAR_DEFINE_INT32(ppc_db16cyc_hint, 0, "CPU",
 
 namespace rex::ppc {
 std::atomic<bool> g_fixed_fp_mode{REX_FIXED_FP_MODE_DEFAULT};
+std::atomic<bool> g_exact_single_fma{false};
 std::atomic<int> g_db16cyc_hint{0};
 
 void Db16cycHint(int mode) noexcept {

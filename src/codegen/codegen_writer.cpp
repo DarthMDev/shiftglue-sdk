@@ -130,6 +130,7 @@ nlohmann::json buildTemplateData(const rex::codegen::CodegenContext& ctx,
       {"register_locals_functions", cfg.registerLocalsFunctions.size()},
       {"fixed_fp_mode_functions", cfg.fixedFpModeFunctions.size()},
       {"single_precision_functions", cfg.singlePrecisionFunctions.size()},
+      {"exact_single_fma_functions", cfg.exactSingleFmaFunctions.size()},
   };
 
   return {
@@ -682,6 +683,7 @@ bool CodegenWriter::write(bool force) {
   referenceConfig.registerLocalsFunctions.clear();
   referenceConfig.fixedFpModeFunctions.clear();
   referenceConfig.singlePrecisionFunctions.clear();
+  referenceConfig.exactSingleFmaFunctions.clear();
   referenceConfig.directCallsBypassThunk = false;
   referenceConfig.callProbes = false;
   referenceConfig.abiPoisonChecks = false;

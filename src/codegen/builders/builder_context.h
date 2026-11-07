@@ -79,7 +79,9 @@ struct RecompilerLocalVariables {
   /// single-precision value at the current instruction (straight-line only:
   /// cleared at labels, calls and hooks). Kept up to date by emitCpp.
   bool singlePrecision{};
+  bool exactSingleFma{};
   uint32_t singleFprs{};
+  bool isExactSingle(size_t index) const { return exactSingleFma && index < 32 && (singleFprs >> index) & 1; }
   bool isSingle(size_t index) const { return singlePrecision && index < 32 && (singleFprs >> index) & 1; }
 
   /// Tracks which GPRs contain MMIO base addresses (bit N = rN is MMIO base)

@@ -493,14 +493,14 @@ void VulkanPipelineCache::InitializeShaderStorage(
 
   auto shader_storage_root = cache_root / "shaders";
   auto shader_storage_shareable_root = shader_storage_root / "shareable";
-  if (!std::filesystem::exists(shader_storage_shareable_root)) {
-    if (!std::filesystem::create_directories(shader_storage_shareable_root)) {
+  std::error_code shareable_error;
+  if (!std::filesystem::is_directory(shader_storage_shareable_root, shareable_error)) {
+    std::filesystem::create_directories(shader_storage_shareable_root, shareable_error);
+    if (!std::filesystem::is_directory(shader_storage_shareable_root, shareable_error)) {
       REXGPU_ERROR(
           "Failed to create the shareable shader storage directory, persistent "
           "shader storage will be disabled: {}",
           rex::path_to_utf8(shader_storage_shareable_root));
-      if (initialization)
-        initialization->Fail("Could not create the shader storage directory.");
       return;
     }
   }
@@ -539,8 +539,6 @@ void VulkanPipelineCache::InitializeShaderStorage(
         "Failed to open the Vulkan pipeline description storage file for "
         "writing, persistent shader storage will be disabled: {}",
         rex::path_to_utf8(pipeline_storage_file_path));
-    if (initialization)
-      initialization->Fail("Could not open pipeline storage.");
     return;
   }
   pipeline_storage_file_flush_needed_ = false;
@@ -686,8 +684,6 @@ void VulkanPipelineCache::InitializeShaderStorage(
         "Failed to open the guest shader storage file for writing, persistent "
         "shader storage will be disabled: {}",
         rex::path_to_utf8(shader_storage_file_path));
-    if (initialization)
-      initialization->Fail("Could not open shader storage.");
     fclose(pipeline_storage_file_);
     pipeline_storage_file_ = nullptr;
     return;
@@ -885,7 +881,7 @@ void VulkanPipelineCache::InitializeShaderStorage(
     return;
   const bool background =
       !pipeline_creations.empty() && REXCVAR_GET(vulkan_pipeline_prewarm_background);
-  if (!pipeline_creations.empty() && REXCVAR_GET(vulkan_pipeline_prewarm_background)) {
+  if (background) {
     StartBackgroundPrewarm(std::move(pipeline_creations));
     pipeline_creations.clear();
   }

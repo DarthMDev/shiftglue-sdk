@@ -86,6 +86,7 @@ struct EmitContext {
   /// A native region copy (`nrg_`): calls that leave the region stay real
   /// calls instead of REX_ORACLE_OPAQUE, and stores are not logged.
   bool regionRealCalls = false;
+  bool exactSingleFma = false;
 
   void fold(uint32_t address, uint32_t size) const {
     if (!foldedRanges)

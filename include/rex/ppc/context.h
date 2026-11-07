@@ -20,6 +20,7 @@
 
 #include <rex/platform/fpscr.h>
 #include <rex/ppc/func.h>
+#include <rex/ppc/fma.h>
 #include <rex/runtime_api.h>
 #include <rex/types.h>
 

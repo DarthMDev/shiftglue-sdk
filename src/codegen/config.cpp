@@ -159,6 +159,7 @@ void ApplyToml(const toml::table& toml, RecompilerConfig& cfg, const std::string
   addressList("register_locals_functions", cfg.registerLocalsFunctions);
   addressList("fixed_fp_mode_functions", cfg.fixedFpModeFunctions);
   addressList("single_precision_functions", cfg.singlePrecisionFunctions);
+  addressList("exact_single_fma_functions", cfg.exactSingleFmaFunctions);
   MergeBool(cfg.guestLineDirectives, toml["guest_line_directives"].value_or(false),
             hasBool("guest_line_directives"), "guest_line_directives");
   MergeBool(cfg.disassemblyComments, toml["disassembly_comments"].value_or(true),
@@ -567,7 +568,7 @@ bool FinalizeConfig(RecompilerConfig& cfg) {
                               cfg.hostLocalLrKeep.end());
   }
   for (auto* list : {&cfg.registerLocalsFunctions, &cfg.fixedFpModeFunctions,
-                     &cfg.singlePrecisionFunctions}) {
+                     &cfg.singlePrecisionFunctions, &cfg.exactSingleFmaFunctions}) {
     std::sort(list->begin(), list->end());
     list->erase(std::unique(list->begin(), list->end()), list->end());
   }

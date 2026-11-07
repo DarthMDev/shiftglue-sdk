@@ -42,6 +42,7 @@ namespace rex::audio {
 namespace {
 
 std::atomic<bool> g_has_the_music{false};
+std::mutex g_audio_init_mutex;
 
 std::vector<uint8_t> ReadFile(const std::filesystem::path& path) {
   std::ifstream file(path, std::ios::binary);
@@ -80,6 +81,8 @@ class WavDecoder final : public Decoder {
     bool have_format = false;
     while (at + 8 <= data_.size()) {
       const uint32_t size = U32(&data_[at + 4]);
+      // Streaming writers and truncated copies overstate the data chunk; it is clamped below.
+      if (size > data_.size() - at - 8 && std::memcmp(&data_[at], "data", 4)) return false;
       const uint8_t* body = &data_[at + 8];
       if (!std::memcmp(&data_[at], "fmt ", 4) && size >= 16 && at + 8 + 16 <= data_.size()) {
         format_ = U16(body);
@@ -97,6 +100,7 @@ class WavDecoder final : public Decoder {
     }
     position_ = begin_;
     return have_format && begin_ && channels_ && rate > 0 &&
+           end_ - begin_ >= size_t(channels_) * bits_ / 8 &&
            ((format_ == 1 && bits_ == 16) || (format_ == 3 && bits_ == 32));
   }
 
@@ -138,8 +142,10 @@ class Mp3Decoder final : public Decoder {
 
   bool Open(std::vector<uint8_t> data) {
     data_ = std::move(data);
+    size_ = data_.size();
+    data_.resize(size_ + AV_INPUT_BUFFER_PADDING_SIZE, 0);
     // An ID3v2 tag in front: its size is four 7-bit bytes.
-    if (data_.size() > 10 && !std::memcmp(data_.data(), "ID3", 3)) {
+    if (size_ > 10 && !std::memcmp(data_.data(), "ID3", 3)) {
       position_ = 10 + (size_t(data_[6] & 0x7F) << 21 | size_t(data_[7] & 0x7F) << 14 |
                         size_t(data_[8] & 0x7F) << 7 | size_t(data_[9] & 0x7F));
       if (data_[5] & 0x10) position_ += 10;  // footer
@@ -170,7 +176,7 @@ class Mp3Decoder final : public Decoder {
     while (out.size() < wanted) {
       if (Receive(out)) continue;
       if (flushed_) return false;
-      if (position_ >= data_.size()) {
+      if (position_ >= size_) {
         // Drain the parser, then the decoder.
         uint8_t* packet_data = nullptr;
         int packet_size = 0;
@@ -185,7 +191,7 @@ class Mp3Decoder final : public Decoder {
       int packet_size = 0;
       const int used = av_parser_parse2(
           parser_, context_, &packet_data, &packet_size, data_.data() + position_,
-          int(std::min<size_t>(data_.size() - position_, 4096)), AV_NOPTS_VALUE, AV_NOPTS_VALUE, 0);
+          int(std::min<size_t>(size_ - position_, 4096)), AV_NOPTS_VALUE, AV_NOPTS_VALUE, 0);
       if (used < 0) return false;
       position_ += size_t(used);
       if (packet_size) Send(packet_data, packet_size);
@@ -235,6 +241,7 @@ class Mp3Decoder final : public Decoder {
   }
 
   std::vector<uint8_t> data_;
+  size_t size_ = 0;
   size_t position_ = 0;
   bool flushed_ = false;
   std::vector<float> pending_;
@@ -244,17 +251,66 @@ class Mp3Decoder final : public Decoder {
   AVFrame* frame_ = nullptr;
 };
 
-std::unique_ptr<Decoder> OpenDecoder(const std::filesystem::path& path) {
+class FadedDecoder final : public Decoder {
+ public:
+  FadedDecoder(std::unique_ptr<Decoder> source, float fade_seconds, float silence_seconds)
+      : source_(std::move(source)) {
+    rate = source_->rate;
+    fade_frames_ = size_t(rate * fade_seconds);
+    silence_frames_ = size_t(rate * silence_seconds);
+  }
+
+  bool Read(std::vector<float>& out, size_t frames) override {
+    // Retain the fade-out tail without relying on compressed-file duration metadata.
+    while (!ended_ && (pending_.size() - offset_) / 2 < frames + fade_frames_) {
+      ended_ = !source_->Read(pending_, 4096);
+    }
+    const size_t remaining = (pending_.size() - offset_) / 2;
+    const size_t available = ended_ ? remaining : remaining - fade_frames_;
+    const size_t count = std::min(frames, available);
+    for (size_t i = 0; i < count; ++i) {
+      float gain = fade_frames_ ? std::min(1.0f, float(emitted_++) / float(fade_frames_)) : 1.0f;
+      if (ended_ && fade_frames_) {
+        gain *= std::min(1.0f, float(remaining - i - 1) / float(fade_frames_));
+      }
+      out.push_back(pending_[offset_++] * gain);
+      out.push_back(pending_[offset_++] * gain);
+    }
+    if (ended_ && count == remaining) {
+      const size_t silence = std::min(frames - count, silence_frames_);
+      out.insert(out.end(), silence * 2, 0.0f);
+      silence_frames_ -= silence;
+    }
+    if (offset_ >= size_t(rate) * 2) {
+      pending_.erase(pending_.begin(), pending_.begin() + offset_);
+      offset_ = 0;
+    }
+    return !ended_ || offset_ < pending_.size() || silence_frames_ != 0;
+  }
+
+ private:
+  std::unique_ptr<Decoder> source_;
+  std::vector<float> pending_;
+  size_t offset_ = 0, emitted_ = 0, fade_frames_ = 0, silence_frames_ = 0;
+  bool ended_ = false;
+};
+
+std::unique_ptr<Decoder> OpenDecoder(const std::filesystem::path& path,
+                                     float fade_seconds = 0.0f, float silence_seconds = 0.0f) {
   const std::string extension = Lower(rex::path_to_utf8(path.extension()));
   auto data = ReadFile(path);
+  std::unique_ptr<Decoder> result;
   if (extension == ".wav") {
     auto decoder = std::make_unique<WavDecoder>();
-    if (decoder->Open(std::move(data))) return decoder;
+    if (decoder->Open(std::move(data))) result = std::move(decoder);
   } else if (extension == ".mp3") {
     auto decoder = std::make_unique<Mp3Decoder>();
-    if (decoder->Open(std::move(data))) return decoder;
+    if (decoder->Open(std::move(data))) result = std::move(decoder);
   }
-  return nullptr;
+  if (result && (fade_seconds > 0.0f || silence_seconds > 0.0f)) {
+    result = std::make_unique<FadedDecoder>(std::move(result), fade_seconds, silence_seconds);
+  }
+  return result;
 }
 
 }  // namespace
@@ -264,6 +320,9 @@ struct HostMusicPlayer::Impl {
   std::condition_variable wake;
   std::thread thread;
   bool quit = false;
+  bool system_player = false;
+  bool ready = false;
+  uint64_t revision = 0;
 
   std::vector<std::filesystem::path> tracks;
   std::vector<size_t> order;  // play order into tracks
@@ -271,6 +330,9 @@ struct HostMusicPlayer::Impl {
   bool active = false;        // a folder is playing (or paused)
   bool paused = false;
   bool shuffle = false;
+  bool repeat = true;
+  float fade_seconds = 0.0f;
+  float silence_seconds = 0.0f;
   float volume = 1.0f;
   int skip = 0;               // tracks to move by, from Next/Previous
   bool restart = false;       // start order[position] again
@@ -288,9 +350,12 @@ struct HostMusicPlayer::Impl {
 
   bool OpenStream() {
     if (stream) return true;
-    if (!SDL_WasInit(SDL_INIT_AUDIO) && !SDL_InitSubSystem(SDL_INIT_AUDIO)) {
-      REXAPU_ERROR("Host music: SDL audio is unavailable: {}", SDL_GetError());
-      return false;
+    {
+      std::lock_guard lock(g_audio_init_mutex);
+      if (!SDL_WasInit(SDL_INIT_AUDIO) && !SDL_InitSubSystem(SDL_INIT_AUDIO)) {
+        REXAPU_ERROR("Host music: SDL audio is unavailable: {}", SDL_GetError());
+        return false;
+      }
     }
     SDL_AudioSpec spec = {SDL_AUDIO_F32, 2, 48000};
     stream = SDL_OpenAudioDeviceStream(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &spec, nullptr, nullptr);
@@ -306,12 +371,14 @@ struct HostMusicPlayer::Impl {
     std::unique_ptr<Decoder> decoder;
     std::vector<float> buffer;
     bool told_active = false;
+    bool draining = false;
+    bool stream_paused = false;
     size_t failures = 0;
     std::unique_lock lock(mutex);
     while (!quit) {
       if (told_active != active) {
         told_active = active;
-        g_has_the_music = told_active;
+        if (system_player) g_has_the_music = told_active;
         if (auto callback = on_active) {
           lock.unlock();
           callback(told_active);
@@ -320,6 +387,7 @@ struct HostMusicPlayer::Impl {
         continue;
       }
       if (!active || tracks.empty()) {
+        ready = false;
         decoder.reset();
         if (stream) SDL_ClearAudioStream(stream);
         wake.wait(lock);
@@ -331,6 +399,7 @@ struct HostMusicPlayer::Impl {
         if (restart) failures = 0;
         skip = 0;
         restart = false;
+        draining = false;
         decoder.reset();
         if (stream) SDL_ClearAudioStream(stream);
       }
@@ -338,22 +407,18 @@ struct HostMusicPlayer::Impl {
         active = false;
         continue;
       }
-      // Under the master volume, and silent where audio is muted (hidden
-      // route runs).
-      SDL_SetAudioStreamGain(stream, paused || REXCVAR_GET(audio_mute)
-                                         ? 0.0f
-                                         : volume * GetOutputGain());
-      if (paused) {
-        SDL_PauseAudioStreamDevice(stream);
-        wake.wait(lock);
-        SDL_ResumeAudioStreamDevice(stream);
-        continue;
-      }
       if (!decoder) {
         const auto path = tracks[order[position]];
+        const auto decoding_revision = revision;
+        const float track_fade = fade_seconds;
+        const float track_silence = silence_seconds;
         lock.unlock();
-        decoder = OpenDecoder(path);
+        decoder = OpenDecoder(path, track_fade, track_silence);
         lock.lock();
+        if (revision != decoding_revision) {
+          decoder.reset();
+          continue;
+        }
         if (!decoder) {
           REXAPU_WARN("Host music: cannot play {}", rex::path_to_utf8(path));
           // Nothing in the folder plays: stop instead of trying forever.
@@ -364,9 +429,35 @@ struct HostMusicPlayer::Impl {
           continue;
         }
         failures = 0;
+        ready = true;
         const SDL_AudioSpec spec = {SDL_AUDIO_F32, 2, decoder->rate};
         SDL_SetAudioStreamFormat(stream, &spec, nullptr);
         REXAPU_INFO("Host music: playing {}", rex::path_to_utf8(path.filename()));
+      }
+      // Under the master volume, and silent where audio is muted (hidden
+      // route runs).
+      SDL_SetAudioStreamGain(stream, paused || REXCVAR_GET(audio_mute)
+                                         ? 0.0f
+                                         : volume * GetOutputGain());
+      if (paused) {
+        SDL_PauseAudioStreamDevice(stream);
+        stream_paused = true;
+        wake.wait(lock, [&] { return quit || !active || !paused || restart || skip; });
+        continue;
+      }
+      if (stream_paused) {
+        SDL_ResumeAudioStreamDevice(stream);
+        stream_paused = false;
+      }
+      if (draining) {
+        if (SDL_GetAudioStreamQueued(stream) > 0) {
+          wake.wait_for(lock, std::chrono::milliseconds(20));
+        } else if (repeat) {
+          skip = 1;
+        } else {
+          active = false;
+        }
+        continue;
       }
       // Keep about a quarter second queued.
       const int queued = SDL_GetAudioStreamQueued(stream);
@@ -376,20 +467,17 @@ struct HostMusicPlayer::Impl {
         continue;
       }
       buffer.clear();
+      const auto decoding_revision = revision;
       lock.unlock();
       const bool more = decoder->Read(buffer, size_t(decoder->rate) / 20);
       lock.lock();
+      if (revision != decoding_revision) continue;
       if (!buffer.empty()) {
         SDL_PutAudioStreamData(stream, buffer.data(), int(buffer.size() * sizeof(float)));
       }
       if (!more) {
-        // The track ended: the next one once this one has played out.
-        decoder.reset();
-        while (!quit && stream && SDL_GetAudioStreamQueued(stream) > 0 && !restart && !skip &&
-               active) {
-          wake.wait_for(lock, std::chrono::milliseconds(20));
-        }
-        if (!restart && !skip) skip = 1;
+        SDL_FlushAudioStream(stream);
+        draining = true;
       }
     }
   }
@@ -400,11 +488,14 @@ bool HostMusicHasTheMusic() {
 }
 
 HostMusicPlayer& HostMusicPlayer::Get() {
-  static HostMusicPlayer player;
+  static HostMusicPlayer player(true);
   return player;
 }
 
-HostMusicPlayer::HostMusicPlayer() : impl_(std::make_unique<Impl>()) {
+HostMusicPlayer::HostMusicPlayer() : HostMusicPlayer(false) {}
+
+HostMusicPlayer::HostMusicPlayer(bool system_player) : impl_(std::make_unique<Impl>()) {
+  impl_->system_player = system_player;
   impl_->thread = std::thread([impl = impl_.get()] { impl->Run(); });
 }
 
@@ -414,9 +505,12 @@ void HostMusicPlayer::Close() {
   {
     std::lock_guard lock(impl_->mutex);
     impl_->quit = true;
+    impl_->active = false;
+    ++impl_->revision;
   }
   impl_->wake.notify_all();
   if (impl_->thread.joinable()) impl_->thread.join();
+  if (impl_->system_player) g_has_the_music = false;
   if (impl_->stream) {
     SDL_DestroyAudioStream(impl_->stream);
     impl_->stream = nullptr;
@@ -443,15 +537,30 @@ std::vector<std::filesystem::path> HostMusicPlayer::FindTracks(
   return tracks;
 }
 
-bool HostMusicPlayer::Play(const std::filesystem::path& folder) {
-  auto tracks = FindTracks(folder);
+bool HostMusicPlayer::Play(const std::filesystem::path& folder, bool paused) {
+  return Start(FindTracks(folder), paused, true, 0.0f, 0.0f);
+}
+
+bool HostMusicPlayer::PlayFile(const std::filesystem::path& file, bool paused,
+                               float fade_seconds, float silence_seconds) {
+  return Start({file}, paused, false, fade_seconds, silence_seconds);
+}
+
+bool HostMusicPlayer::Start(std::vector<std::filesystem::path> tracks, bool paused, bool repeat,
+                            float fade_seconds, float silence_seconds) {
   {
     std::lock_guard lock(impl_->mutex);
     impl_->tracks = std::move(tracks);
+    impl_->repeat = repeat;
+    impl_->fade_seconds = fade_seconds;
+    impl_->silence_seconds = silence_seconds;
     impl_->Reorder();
     impl_->position = 0;
     impl_->restart = true;
-    impl_->paused = false;
+    impl_->skip = 0;
+    impl_->ready = false;
+    ++impl_->revision;
+    impl_->paused = paused;
     impl_->active = !impl_->tracks.empty();
   }
   impl_->wake.notify_all();
@@ -463,6 +572,7 @@ void HostMusicPlayer::Stop() {
     std::lock_guard lock(impl_->mutex);
     impl_->active = false;
     impl_->paused = false;
+    ++impl_->revision;
   }
   impl_->wake.notify_all();
 }
@@ -479,6 +589,7 @@ void HostMusicPlayer::Next() {
   {
     std::lock_guard lock(impl_->mutex);
     ++impl_->skip;
+    ++impl_->revision;
   }
   impl_->wake.notify_all();
 }
@@ -487,6 +598,7 @@ void HostMusicPlayer::Previous() {
   {
     std::lock_guard lock(impl_->mutex);
     --impl_->skip;
+    ++impl_->revision;
   }
   impl_->wake.notify_all();
 }
@@ -513,6 +625,7 @@ void HostMusicPlayer::SetShuffle(bool shuffle) {
 HostMusicPlayer::Status HostMusicPlayer::GetStatus() const {
   std::lock_guard lock(impl_->mutex);
   Status status;
+  status.ready = impl_->active && impl_->ready;
   status.playing = impl_->active && !impl_->paused;
   status.paused = impl_->active && impl_->paused;
   status.count = impl_->tracks.size();
@@ -532,9 +645,10 @@ void HostMusicPlayer::SetActiveCallback(std::function<void(bool active)> callbac
 }
 
 std::vector<float> HostMusicPlayer::DecodeForTest(const std::filesystem::path& file,
-                                                  int& sample_rate) {
+                                                  int& sample_rate, float fade_seconds,
+                                                  float silence_seconds) {
   std::vector<float> samples;
-  auto decoder = OpenDecoder(file);
+  auto decoder = OpenDecoder(file, fade_seconds, silence_seconds);
   sample_rate = decoder ? decoder->rate : 0;
   while (decoder && decoder->Read(samples, 4096)) {
   }
