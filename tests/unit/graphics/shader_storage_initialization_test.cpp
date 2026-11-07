@@ -54,7 +54,7 @@ TEST_CASE("Shader startup zero work and disabled storage can finish", "[shader_s
 TEST_CASE("Shader startup snapshots stay coherent during worker completion", "[shader_startup]") {
   ShaderStorageInitialization operation;
   operation.SetTotal(400);
-  std::vector<std::jthread> workers;
+  std::vector<std::thread> workers;
   for (size_t i = 0; i != 4; ++i) {
     workers.emplace_back([&] {
       for (size_t j = 0; j != 100; ++j)
@@ -66,7 +66,8 @@ TEST_CASE("Shader startup snapshots stay coherent during worker completion", "[s
     REQUIRE(snapshot.completed <= snapshot.total);
     std::this_thread::yield();
   }
-  workers.clear();
+  for (auto& worker : workers)
+    worker.join();
   operation.Finish();
   REQUIRE(operation.GetSnapshot().phase == Phase::kSucceeded);
 }

@@ -148,6 +148,12 @@ option(REXGPU_FH1_ORDERED_CENSUS "Compile the experimental ordered draw census" 
 if(REXGPU_FH1_ORDERED_CENSUS)
     list(APPEND REXGPU_XENOS_SOURCES fh1_frame_order.cpp)
 endif()
+if(APPLE)
+    # Apple's libc++ still gates std::jthread/std::stop_token behind the
+    # experimental-library feature flag; neither type crosses a header boundary.
+    set_source_files_properties(startup_pipeline_compilation.cpp PROPERTIES
+        COMPILE_OPTIONS "-fexperimental-library")
+endif()
 add_library(rexgpu-fh1 SHARED ${REXGPU_XENOS_SOURCES})
 add_library(rex::gpu-fh1 ALIAS rexgpu-fh1)
 if(REXGLUE_USE_D3D12)
